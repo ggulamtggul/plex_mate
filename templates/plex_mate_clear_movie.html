@@ -100,33 +100,24 @@ function safe_notify(msg, type) {
 }
 
 function run_seq_step(step_idx) {
-  seq_state.step_idx = step_idx;
-  seq_state.has_started_run = false;
-  var cmd = seq_state.steps[step_idx];
-  var step_title = seq_state.step_names[cmd];
-  safe_notify(`[${seq_state.section_name}] ${step_title} 자동 시작`, 'info');
-  globalSendCommandPage(cmd, $('#library_select').val(), $('#dryrun').is(":checked"));
+  // 백엔드 순차 실행으로 대체됨
 }
 
 $("body").on('click', '#movie_start_all_btn', function(e){
   e.preventDefault();
   var sec_name = $('#library_select option:selected').text() || '선택 라이브러리';
-  seq_state.active = true;
-  seq_state.section_name = sec_name;
-  safe_notify(`<strong>[${sec_name}] 1~3단계 순차 실행</strong>을 시작합니다.`, 'success');
-  run_seq_step(0);
+  safe_notify(`<strong>[${sec_name}] 1~3단계 전체 순차 실행(서버 백엔드)</strong>을 시작합니다.<br>웹페이지를 닫아도 백그라운드에서 끝까지 자동 진행됩니다.`, 'success');
+  globalSendCommandPage('start_all', $('#library_select').val(), $('#dryrun').is(":checked"));
 });
 
 $("body").on('click', '#movie_start0_btn', function(e){
   e.preventDefault();
-  seq_state.active = false;
   seq_state.manual_step_name = '크기 확인';
   globalSendCommandPage('start0', $('#library_select').val());
 });
 
 $("body").on('click', '#movie_start1_btn', function(e){
   e.preventDefault();
-  seq_state.active = false;
   seq_state.section_name = $('#library_select option:selected').text();
   seq_state.manual_step_name = '1단계';
   globalSendCommandPage('start1', $('#library_select').val(), $('#dryrun').is(":checked"));
@@ -134,7 +125,6 @@ $("body").on('click', '#movie_start1_btn', function(e){
 
 $("body").on('click', '#movie_start2_btn', function(e){
   e.preventDefault();
-  seq_state.active = false;
   seq_state.section_name = $('#library_select option:selected').text();
   seq_state.manual_step_name = '2단계';
   globalSendCommandPage('start2', $('#library_select').val(), $('#dryrun').is(":checked"));
@@ -142,7 +132,6 @@ $("body").on('click', '#movie_start2_btn', function(e){
 
 $("body").on('click', '#movie_start3_btn', function(e){
   e.preventDefault();
-  seq_state.active = false;
   seq_state.section_name = $('#library_select option:selected').text();
   seq_state.manual_step_name = '3단계';
   globalSendCommandPage('start3', $('#library_select').val(), $('#dryrun').is(":checked"));
@@ -150,15 +139,13 @@ $("body").on('click', '#movie_start3_btn', function(e){
 
 $("body").on('click', '#movie_start4_btn', function(e){
   e.preventDefault();
-  seq_state.active = false;
   seq_state.manual_step_name = '4단계';
   globalSendCommandPage('start4', $('#library_select').val(), $('#dryrun').is(":checked"));
 });
 
 $("body").on('click', '#movie_stop_btn', function(e){
   e.preventDefault();
-  seq_state.active = false;
-  safe_notify('사용자에 의해 작업이 중지되었습니다.', 'warning');
+  safe_notify('사용자에 의해 작업이 중지 요청되었습니다.', 'warning');
   globalSendCommandPage('stop');
 });
 
@@ -192,17 +179,13 @@ function make_status(data) {
   str = '';
   if (data.is_working == 'run') {
     tmp = '실행중';
-    if (seq_state.active) {
-      seq_state.has_started_run = true;
-      var cur_cmd = seq_state.steps[seq_state.step_idx];
-      var cur_name = seq_state.step_names[cur_cmd];
-      tmp = `[순차실행 ${seq_state.step_idx + 1}/3단계: ${cur_name}] ` + tmp;
+    if (data.seq_step) {
+      tmp = `[순차실행 ${data.seq_step}] ` + tmp;
     }
   } else if (data.is_working == 'wait') {
     tmp = '대기중';
   } else if (data.is_working == 'stop') {
     tmp = '사용자 중지';
-    seq_state.active = false;
   }
 
   if (data.count != null) tmp += '(' + data.current + '/' + data.count + ') ';
@@ -211,6 +194,11 @@ function make_status(data) {
   if (data.total_size != null && data.total_size != 0) {
     str += ' / 전체크기 : ' + color(humanFileSize(data.total_size), 'blue');
     str += ' / 삭제크기 : ' + color(humanFileSize(data.remove_size));
+  }
+
+  // 서버에서 전달된 직전 작업 정보가 있으면 저장 및 localStorage 동기화
+  if (data.last_work) {
+    save_last_work(data.last_work);
   }
 
   // 직전 작업 정보 표시 (대기 중일 때 항상 표기)
@@ -222,57 +210,6 @@ function make_status(data) {
   }
   str += '</h4>';
   $('#status_div').html(str);
-
-  // 순차 실행 상태 머신: 실제로 run을 거친 후 wait가 되었을 때만 다음 단계로 이동!
-  if (seq_state.active && seq_state.has_started_run && data.is_working == 'wait') {
-    var finished_cmd = seq_state.steps[seq_state.step_idx];
-    var finished_name = seq_state.step_names[finished_cmd];
-    var d = new Date();
-    var now_time = `${d.getMonth()+1}/${d.getDate()} ${d.toLocaleTimeString()}`;
-
-    // 직전 작업 기록 저장 (localStorage 영구 보존)
-    save_last_work({
-      section_name: seq_state.section_name || $('#library_select option:selected').text(),
-      step_name: finished_name,
-      time: now_time,
-      remove_size: data.remove_size || 0
-    });
-
-    seq_state.has_started_run = false; // 플래그 초기화
-
-    // 다음 단계 확인
-    var next_idx = seq_state.step_idx + 1;
-    if (next_idx < seq_state.steps.length) {
-      var next_cmd = seq_state.steps[next_idx];
-      var next_name = seq_state.step_names[next_cmd];
-      safe_notify(`${finished_name} 완료! 2초 후 <strong>${next_name}</strong>을 시작합니다.`, 'info');
-
-      // UI에 다음 단계 카운트다운 표시
-      $('#status_div').append(`<div id="seq_countdown_div" style="color:#17a2b8; font-size:14px; margin-top:4px;">⏳ ${finished_name} 완료 → <strong>${next_name}</strong> 자동 시작 대기 중 (2초)...</div>`);
-
-      setTimeout(function() {
-        if (seq_state.active) {
-          run_seq_step(next_idx);
-        }
-      }, 2000);
-    } else {
-      seq_state.active = false;
-      safe_notify(`🎉 <strong>[${seq_state.section_name}] 1~3단계 전체 순차 실행이 완료되었습니다!</strong>`, 'success');
-      $('#seq_countdown_div')?.remove();
-    }
-  } else if (!seq_state.active && data.is_working == 'wait' && seq_state.section_name) {
-    // 단일 수동 단계 실행 후 완료 시에도 직전 작업 기록 업데이트 (localStorage 영구 보존)
-    var d = new Date();
-    var now_time = `${d.getMonth()+1}/${d.getDate()} ${d.toLocaleTimeString()}`;
-    if (!seq_state.last_work || seq_state.last_work.time !== now_time) {
-      save_last_work({
-        section_name: seq_state.section_name,
-        step_name: seq_state.manual_step_name || '단일 작업',
-        time: now_time,
-        remove_size: data.remove_size || 0
-      });
-    }
-  }
 }
 
 </script> 
