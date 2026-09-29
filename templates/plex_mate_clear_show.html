@@ -22,6 +22,7 @@
   <div class="input-group col-sm" style="padding-left:0px; padding-top:5px">
     <div class="btn-group btn-group-sm flex-wrap mr-2" role="group" style="padding-left:5px; padding-top:0px">
       <button id="movie_stop_btn" class="btn btn-sm btn-outline-danger">중지</button>
+      <button id="show_start_all_btn" class="btn btn-sm btn-outline-success">1~3단계 순차 실행</button>
       <button id="movie_start0_btn" class="btn btn-sm btn-outline-warning">쇼별 메타 크기만 확인</button>
       <button id="movie_start1_btn" class="btn btn-sm btn-outline-info">1단계 시작</button>
       <button id="movie_start21_btn" class="btn btn-sm btn-outline-info">2-1단계 시작</button>
@@ -68,37 +69,62 @@ $(document).ready(function(){
   socket_init();
 });
 
+var auto_sequential = false;
+var auto_current_step = 0; // 1: start1, 2: start21, 3: start22, 4: start3
+
+$("body").on('click', '#show_start_all_btn', function(e){
+  e.preventDefault();
+  auto_sequential = true;
+  auto_current_step = 1;
+  notify('1~3단계 전체 순차 실행을 시작합니다. (1단계 진행 중)', 'success');
+  globalSendCommandPage('start1', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
+});
+
 $("body").on('click', '#movie_start0_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start0', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
 $("body").on('click', '#movie_start1_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start1', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
 $("body").on('click', '#movie_start21_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start21', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 $("body").on('click', '#movie_start22_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start22', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
 $("body").on('click', '#movie_start3_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start3', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
 $("body").on('click', '#movie_start4_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start4', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
 $("body").on('click', '#movie_stop_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('stop');
 });
 
@@ -106,7 +132,6 @@ $("body").on('click', '#movie_stop_btn', function(e){
 
 
 function make_one(data) {
-  console.log(data);
   row = j_row_start_hover();
   row += make_log("제목", data.db.title);
   row += make_log("HASH / GUID", data.db.hash + ' - ' + data.db.guid);
@@ -136,28 +161,22 @@ function make_one(data) {
     }
     row += make_log("Season " + season_key, tmp);
   }
-
-
-  /*
-  if (data.use_filepath != null) {
-    row += make_log("사용파일", '<pre>' + data.use_filepath.join('\n') + '</pre>');
-  }
-  if (data.remove_filepath != null) {
-    row += make_log("삭제파일", '<pre>' + data.remove_filepath.join('\n') + '</pre>');
-  }
-  */
   row += j_row_end();
   return row;
 }
 
 function make_status(data) {
-  console.log('status_div')
-  console.log(data)
   str = '';
   if (data.is_working == 'run')  tmp = '실행중';
   else if (data.is_working == 'wait')  tmp = '대기중';
   else if (data.is_working == 'stop')  tmp = '사용자 중지';
   if (data.count != null) tmp += '(' + data.current + '/' + data.count + ') ';
+  
+  if (auto_sequential && data.is_working == 'run') {
+    var step_labels = {1: '1단계', 2: '2-1단계', 3: '2-2단계', 4: '3단계'};
+    tmp = `[순차실행 ${step_labels[auto_current_step]}] ` + tmp;
+  }
+
   str += '<h4>' + tmp;
   if (data.total_size != null && data.total_size != 0) {
     str += ' / 전체크기 : ' + color(humanFileSize(data.total_size), 'blue');
@@ -165,6 +184,39 @@ function make_status(data) {
   }
   str += '</h4>';
   $('#status_div').html(str);
+
+  // 순차 실행 자동 진행
+  if (auto_sequential && data.is_working == 'wait') {
+    if (auto_current_step === 1) {
+      auto_current_step = 2;
+      notify('1단계 완료! <strong>2-1단계</strong>를 자동으로 시작합니다.', 'info');
+      setTimeout(function() {
+        if (auto_sequential) {
+          globalSendCommandPage('start21', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
+        }
+      }, 1500);
+    } else if (auto_current_step === 2) {
+      auto_current_step = 3;
+      notify('2-1단계 완료! <strong>2-2단계</strong>를 자동으로 시작합니다.', 'info');
+      setTimeout(function() {
+        if (auto_sequential) {
+          globalSendCommandPage('start22', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
+        }
+      }, 1500);
+    } else if (auto_current_step === 3) {
+      auto_current_step = 4;
+      notify('2-2단계 완료! <strong>3단계</strong>를 자동으로 시작합니다.', 'info');
+      setTimeout(function() {
+        if (auto_sequential) {
+          globalSendCommandPage('start3', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
+        }
+      }, 1500);
+    } else if (auto_current_step === 4) {
+      auto_sequential = false;
+      auto_current_step = 0;
+      notify('🎉 <strong>TV 쇼 1~3단계 전체 순차 실행이 완료되었습니다!</strong>', 'success');
+    }
+  }
 }
 
 </script> 

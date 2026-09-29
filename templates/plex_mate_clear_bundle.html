@@ -48,7 +48,8 @@
   </div>
   <div class="input-group col-sm-4" style="padding-left:0px; padding-top:5px">
     <div class="btn-group btn-group-sm flex-wrap mr-2" role="group" style="padding-left:5px; padding-top:0px">
-      <button id="bundle_stop_btn" class="btn btn-sm btn-outline-info">중지</button>
+      <button id="bundle_stop_btn" class="btn btn-sm btn-outline-danger">중지</button>
+      <button id="bundle_start_all_btn" class="btn btn-sm btn-outline-success">1~3단계 순차 실행</button>
       <button id="bundle_start_btn" class="btn btn-sm btn-outline-info">1단계</button>
       <button id="bundle_start2_btn" class="btn btn-sm btn-outline-info">2단계</button>
       <button id="bundle_start3_btn" class="btn btn-sm btn-outline-info">3단계</button>
@@ -90,24 +91,43 @@ $("body").on('change', '#local_type', function(e){
 });
 
 
+var auto_sequential = false;
+var auto_current_step = 0;
+
+$("body").on('click', '#bundle_start_all_btn', function(e){
+  e.preventDefault();
+  auto_sequential = true;
+  auto_current_step = 1;
+  notify('번들 1~3단계 순차 실행을 시작합니다. (1단계 진행 중)', 'success');
+  globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step1");
+});
+
 $("body").on('click', '#bundle_stop_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('stop');
 });
 
 
 $("body").on('click', '#bundle_start_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step1");
 });
 
 $("body").on('click', '#bundle_start2_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step2");
 });
 
 $("body").on('click', '#bundle_start3_btn', function(e){
   e.preventDefault();
+  auto_sequential = false;
+  auto_current_step = 0;
   globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step3");
 });
 
@@ -133,6 +153,11 @@ function make_status(data) {
   else if (data.is_working == 'wait')  tmp = '대기중';
   else if (data.is_working == 'stop')  tmp = '사용자 중지';
   if (data.count != null) tmp += '(' + data.current + '/' + data.count + ') ';
+  
+  if (auto_sequential && data.is_working == 'run') {
+    tmp = `[순차실행 ${auto_current_step}/3단계] ` + tmp;
+  }
+
   str += '<h4>' + tmp;
   if (data.remove_size != null && data.remove_size != 0) {
     str += ' / 삭제 번들 수  : ' + color(data.remove_count);
@@ -140,6 +165,31 @@ function make_status(data) {
   }
   str += '</h4>';
   $('#status_div').html(str);
+
+  // 순차 실행 자동 진행
+  if (auto_sequential && data.is_working == 'wait') {
+    if (auto_current_step === 1) {
+      auto_current_step = 2;
+      notify('1단계 완료! <strong>2단계</strong>를 자동으로 시작합니다.', 'info');
+      setTimeout(function() {
+        if (auto_sequential) {
+          globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step2");
+        }
+      }, 1500);
+    } else if (auto_current_step === 2) {
+      auto_current_step = 3;
+      notify('2단계 완료! <strong>3단계</strong>를 자동으로 시작합니다.', 'info');
+      setTimeout(function() {
+        if (auto_sequential) {
+          globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step3");
+        }
+      }, 1500);
+    } else if (auto_current_step === 3) {
+      auto_sequential = false;
+      auto_current_step = 0;
+      notify('🎉 <strong>번들 1~3단계 전체 순차 실행이 완료되었습니다!</strong>', 'success');
+    }
+  }
 }
 
 
