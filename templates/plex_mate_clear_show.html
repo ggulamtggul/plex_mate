@@ -64,10 +64,12 @@
 <div id="list_div"></div>
 
 <script type="text/javascript">
-
-$(document).ready(function(){
-  socket_init();
-});
+var STORAGE_KEY = 'pm_last_work_show';
+var initial_last_work = null;
+try {
+  var saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) initial_last_work = JSON.parse(saved);
+} catch(e) {}
 
 var seq_state = {
   active: false,
@@ -75,9 +77,25 @@ var seq_state = {
   steps: ['start1', 'start21', 'start22', 'start3'],
   step_names: {'start1': '1단계', 'start21': '2-1단계', 'start22': '2-2단계', 'start3': '3단계'},
   section_name: '',
+  manual_step_name: '',
   has_started_run: false,
-  last_work: null
+  last_work: initial_last_work
 };
+
+function save_last_work(work) {
+  seq_state.last_work = work;
+  try {
+    if (work) localStorage.setItem(STORAGE_KEY, JSON.stringify(work));
+  } catch(e) {}
+}
+
+$(document).ready(function(){
+  socket_init();
+  if (seq_state.last_work) {
+    var badge_html = ` <span style="font-size:13px; font-weight:normal; margin-left:12px; color:#28a745; background:rgba(40,167,69,0.15); padding:3px 8px; border-radius:4px; border:1px solid rgba(40,167,69,0.3);"><i class="fa fa-check-circle"></i> 직전 완료: <strong>[${seq_state.last_work.section_name}] ${seq_state.last_work.step_name}</strong> (${seq_state.last_work.time}) / 삭제: ${color(humanFileSize(seq_state.last_work.remove_size))}</span>`;
+    $('#status_div').html('<h4>대기중' + badge_html + '</h4>');
+  }
+});
 
 function safe_notify(msg, type) {
   try {
@@ -112,6 +130,7 @@ $("body").on('click', '#show_start_all_btn', function(e){
 $("body").on('click', '#movie_start0_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
+  seq_state.manual_step_name = '쇼별 메타 크기 확인';
   globalSendCommandPage('start0', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
@@ -119,6 +138,7 @@ $("body").on('click', '#movie_start1_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
   seq_state.section_name = $('#library_select option:selected').text();
+  seq_state.manual_step_name = '1단계';
   globalSendCommandPage('start1', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
@@ -126,6 +146,7 @@ $("body").on('click', '#movie_start21_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
   seq_state.section_name = $('#library_select option:selected').text();
+  seq_state.manual_step_name = '2-1단계';
   globalSendCommandPage('start21', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
@@ -133,6 +154,7 @@ $("body").on('click', '#movie_start22_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
   seq_state.section_name = $('#library_select option:selected').text();
+  seq_state.manual_step_name = '2-2단계';
   globalSendCommandPage('start22', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
@@ -140,12 +162,14 @@ $("body").on('click', '#movie_start3_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
   seq_state.section_name = $('#library_select option:selected').text();
+  seq_state.manual_step_name = '3단계';
   globalSendCommandPage('start3', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
 $("body").on('click', '#movie_start4_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
+  seq_state.manual_step_name = '4단계';
   globalSendCommandPage('start4', $('#library_select').val(), $('#dryrun').is(":checked"), $('#remove_orphans').is(":checked"));
 });
 
@@ -232,15 +256,16 @@ function make_status(data) {
   if (seq_state.active && seq_state.has_started_run && data.is_working == 'wait') {
     var finished_cmd = seq_state.steps[seq_state.step_idx];
     var finished_name = seq_state.step_names[finished_cmd];
-    var now_time = new Date().toLocaleTimeString();
+    var d = new Date();
+    var now_time = `${d.getMonth()+1}/${d.getDate()} ${d.toLocaleTimeString()}`;
 
-    // 직전 작업 기록 저장
-    seq_state.last_work = {
+    // 직전 작업 기록 저장 (localStorage 영구 보존)
+    save_last_work({
       section_name: seq_state.section_name || $('#library_select option:selected').text(),
       step_name: finished_name,
       time: now_time,
       remove_size: data.remove_size || 0
-    };
+    });
 
     seq_state.has_started_run = false;
 
@@ -264,14 +289,16 @@ function make_status(data) {
       $('#seq_countdown_div')?.remove();
     }
   } else if (!seq_state.active && data.is_working == 'wait' && seq_state.section_name) {
-    var now_time = new Date().toLocaleTimeString();
+    // 단일 수동 단계 실행 후 완료 시에도 직전 작업 기록 업데이트 (localStorage 영구 보존)
+    var d = new Date();
+    var now_time = `${d.getMonth()+1}/${d.getDate()} ${d.toLocaleTimeString()}`;
     if (!seq_state.last_work || seq_state.last_work.time !== now_time) {
-      seq_state.last_work = {
+      save_last_work({
         section_name: seq_state.section_name,
-        step_name: '단일 작업',
+        step_name: seq_state.manual_step_name || '단일 작업',
         time: now_time,
         remove_size: data.remove_size || 0
-      };
+      });
     }
   }
 }

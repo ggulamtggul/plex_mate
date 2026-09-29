@@ -74,22 +74,12 @@
 <div id="list_div"></div>
 
 <script type="text/javascript">
-
-$(document).ready(function(){
-  socket_init();
-});
-
-
-$("body").on('change', '#local_type', function(e){
-  e.preventDefault();
-  value = $(this).val();
-  if (value == 'Metadata') {
-    $("#meta_type").attr("disabled", false);
-  } else {
-    $("#meta_type").attr("disabled", true);
-  }
-});
-
+var STORAGE_KEY = 'pm_last_work_bundle';
+var initial_last_work = null;
+try {
+  var saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) initial_last_work = JSON.parse(saved);
+} catch(e) {}
 
 function get_bundle_target_name() {
   var l = $('#local_type').val();
@@ -104,9 +94,37 @@ var seq_state = {
   steps: ['step1', 'step2', 'step3'],
   step_names: {'step1': '1단계', 'step2': '2단계', 'step3': '3단계'},
   section_name: '',
+  manual_step_name: '',
   has_started_run: false,
-  last_work: null // { section_name, step_name, time, remove_count, remove_size }
+  last_work: initial_last_work
 };
+
+function save_last_work(work) {
+  seq_state.last_work = work;
+  try {
+    if (work) localStorage.setItem(STORAGE_KEY, JSON.stringify(work));
+  } catch(e) {}
+}
+
+$(document).ready(function(){
+  socket_init();
+  if (seq_state.last_work) {
+    var count_info = seq_state.last_work.remove_count != null ? ` / 삭제 번들: ${color(seq_state.last_work.remove_count)}개` : '';
+    var badge_html = ` <span style="font-size:13px; font-weight:normal; margin-left:12px; color:#28a745; background:rgba(40,167,69,0.15); padding:3px 8px; border-radius:4px; border:1px solid rgba(40,167,69,0.3);"><i class="fa fa-check-circle"></i> 직전 완료: <strong>[${seq_state.last_work.section_name}] ${seq_state.last_work.step_name}</strong> (${seq_state.last_work.time})${count_info} / 삭제: ${color(humanFileSize(seq_state.last_work.remove_size))}</span>`;
+    $('#status_div').html('<h4>대기중' + badge_html + '</h4>');
+  }
+});
+
+
+$("body").on('change', '#local_type', function(e){
+  e.preventDefault();
+  value = $(this).val();
+  if (value == 'Metadata') {
+    $("#meta_type").attr("disabled", false);
+  } else {
+    $("#meta_type").attr("disabled", true);
+  }
+});
 
 function safe_notify(msg, type) {
   try {
@@ -150,6 +168,7 @@ $("body").on('click', '#bundle_start_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
   seq_state.section_name = get_bundle_target_name();
+  seq_state.manual_step_name = '1단계';
   globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step1");
 });
 
@@ -157,6 +176,7 @@ $("body").on('click', '#bundle_start2_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
   seq_state.section_name = get_bundle_target_name();
+  seq_state.manual_step_name = '2단계';
   globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step2");
 });
 
@@ -164,6 +184,7 @@ $("body").on('click', '#bundle_start3_btn', function(e){
   e.preventDefault();
   seq_state.active = false;
   seq_state.section_name = get_bundle_target_name();
+  seq_state.manual_step_name = '3단계';
   globalSendCommandPage('start', $('#local_type').val()+'_'+$('#meta_type').val()+'_'+ $('#prefix').val(), $('#dryrun').is(":checked"), "step3");
 });
 
@@ -223,16 +244,17 @@ function make_status(data) {
   if (seq_state.active && seq_state.has_started_run && data.is_working == 'wait') {
     var finished_cmd = seq_state.steps[seq_state.step_idx];
     var finished_name = seq_state.step_names[finished_cmd];
-    var now_time = new Date().toLocaleTimeString();
+    var d = new Date();
+    var now_time = `${d.getMonth()+1}/${d.getDate()} ${d.toLocaleTimeString()}`;
 
-    // 직전 작업 기록 저장
-    seq_state.last_work = {
+    // 직전 작업 기록 저장 (localStorage 영구 보존)
+    save_last_work({
       section_name: seq_state.section_name || get_bundle_target_name(),
       step_name: finished_name,
       time: now_time,
       remove_count: data.remove_count || 0,
       remove_size: data.remove_size || 0
-    };
+    });
 
     seq_state.has_started_run = false; // 플래그 초기화
 
@@ -257,16 +279,17 @@ function make_status(data) {
       $('#seq_countdown_div')?.remove();
     }
   } else if (!seq_state.active && data.is_working == 'wait' && seq_state.section_name) {
-    // 단일 수동 단계 실행 후 완료 시에도 직전 작업 기록 업데이트
-    var now_time = new Date().toLocaleTimeString();
+    // 단일 수동 단계 실행 후 완료 시에도 직전 작업 기록 업데이트 (localStorage 영구 보존)
+    var d = new Date();
+    var now_time = `${d.getMonth()+1}/${d.getDate()} ${d.toLocaleTimeString()}`;
     if (!seq_state.last_work || seq_state.last_work.time !== now_time) {
-      seq_state.last_work = {
+      save_last_work({
         section_name: seq_state.section_name,
-        step_name: '단일 작업',
+        step_name: seq_state.manual_step_name || '단일 작업',
         time: now_time,
         remove_count: data.remove_count || 0,
         remove_size: data.remove_size || 0
-      };
+      });
     }
   }
 }
