@@ -433,6 +433,7 @@ class Task(object):
                                 'section_type': 'movie',
                                 'msg': f"영화 메타 새로고침 요청 완료 ({m_title})"
                             })
+                            time.sleep(0.1)
                         except Exception as e:
                             logger.error(f"[DB기준] 영화 메타 새로고침 실패: {m_title} - {str(e)}")
 
@@ -454,6 +455,7 @@ class Task(object):
                                 'section_type': 'show',
                                 'msg': f"TV 쇼 메타 새로고침 요청 완료 ({s_title})"
                             })
+                            time.sleep(0.1)
                         except Exception as e:
                             logger.error(f"[DB기준] TV쇼 메타 새로고침 실패: {s_title} - {str(e)}")
 
@@ -542,6 +544,7 @@ class Task(object):
 
                     korean_langs = {'ko', 'kor', 'korean', '한국어'}
                     korean_countries = {'한국', '대한민국', 'korea', 'south korea', 'republic of korea'}
+                    refreshed_disk_target_ids = set()
 
                     for row_idx, m_row in enumerate(media_rows):
                         if row_idx % 50 == 0:
@@ -631,12 +634,17 @@ class Task(object):
                                 if found_disk_sub:
                                     # 디스크에 자막 파일이 존재함 -> 메타 새로고침 지시하여 Plex DB에 등록 유도!
                                     status['db_found_disk_sub_count'] += 1
-                                    try:
-                                        logger.warning(f"[DB기준] 디스크 자막 발견으로 메타 새로고침: {full_title} (자막: {found_disk_sub})")
-                                        PlexWebHandle.refresh_by_id(refresh_target_id)
-                                        status['db_meta_refresh_count'] += 1
-                                    except Exception as e:
-                                        logger.error(f"[DB기준] 메타 새로고침 실패: {str(e)}")
+                                    is_new_refresh = False
+                                    if refresh_target_id not in refreshed_disk_target_ids:
+                                        refreshed_disk_target_ids.add(refresh_target_id)
+                                        is_new_refresh = True
+                                        try:
+                                            logger.warning(f"[DB기준] 디스크 자막 발견으로 메타 새로고침: {full_title} (ID: {refresh_target_id}, 자막: {found_disk_sub})")
+                                            PlexWebHandle.refresh_by_id(refresh_target_id)
+                                            status['db_meta_refresh_count'] += 1
+                                            time.sleep(0.1)
+                                        except Exception as e:
+                                            logger.error(f"[DB기준] 메타 새로고침 실패: {str(e)}")
 
                                     found_log = {
                                         'status': status,
@@ -646,7 +654,7 @@ class Task(object):
                                         'video_file': video_file,
                                         'found_sub_path': found_disk_sub,
                                         'section_type': section_type,
-                                        'msg': f"디스크 자막 발견됨 -> 메타 새로고침 지시 완료"
+                                        'msg': f"디스크 자막 발견됨 -> 메타 새로고침 지시 완료" if is_new_refresh else "디스크 자막 발견됨 (해당 쇼 메타 새로고침 이미 요청됨)"
                                     }
                                     notify(found_log)
                                 else:
