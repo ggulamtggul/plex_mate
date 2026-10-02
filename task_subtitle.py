@@ -529,18 +529,20 @@ class Task(object):
                             media_streams_map[m_id] = []
                         media_streams_map[m_id].append(st)
 
-                    def is_hardsub(video_file):
+                    def detect_hardsub_tag(video_file):
                         if not video_file:
-                            return False
+                            return None
                         fname = os.path.basename(video_file)
                         stem, _ = os.path.splitext(fname)
                         # 1. 파일명에 ST 또는 SW (단어 경계 또는 끝자리, 예: -SW, .SW, _SW, -ST, .ST, _ST 등)
-                        if re.search(r'[\.\-_](ST|SW)($|[\.\-_])', stem, re.IGNORECASE):
-                            return True
+                        m = re.search(r'[\.\-_](ST|SW)($|[\.\-_])', stem, re.IGNORECASE)
+                        if m:
+                            return m.group(1).upper()
                         # 2. 파일명에 KOR 또는 자체자막 포함 (예: .KOR., -KOR-, [KOR], [자체자막] 등)
-                        if re.search(r'(^|[\.\s_\-\[\(])(KOR|자체자막)($|[\.\s_\-\]\)])', stem, re.IGNORECASE):
-                            return True
-                        return False
+                        m = re.search(r'(^|[\.\s_\-\[\(])(KOR|자체자막)($|[\.\s_\-\]\)])', stem, re.IGNORECASE)
+                        if m:
+                            return m.group(2).upper()
+                        return None
 
                     korean_langs = {'ko', 'kor', 'korean', '한국어'}
                     korean_countries = {'한국', '대한민국', 'korea', 'south korea', 'republic of korea'}
@@ -563,12 +565,7 @@ class Task(object):
                             if any(k in tags_country for k in korean_countries):
                                 continue
 
-                            # 1. 자체자막(Hardsub) 검사 (오직 파일명만 검사)
-                            if is_hardsub(video_file):
-                                status['db_hardsub_count'] += 1
-                                continue
-
-                            # 2. 한글 자막 스트림 보유 여부 검사
+                            # 1. 한글 자막 스트림 보유 여부 검사 (내부/외부 자막)
                             m_streams = media_streams_map.get(m_row['media_item_id'], [])
                             has_korean_sub = False
 
@@ -658,16 +655,24 @@ class Task(object):
                                     }
                                     notify(found_log)
                                 else:
-                                    # 디스크에도 자막이 전혀 없음 -> 진짜 한글 자막 누락 외화
+                                    # 디스크에도 자막이 전혀 없음 -> 한글 자막 누락 외화 (자체자막 태그 여부 감지)
                                     status['db_missing_korean_count'] += 1
+                                    hardsub_tag = detect_hardsub_tag(video_file)
+                                    if hardsub_tag:
+                                        status['db_hardsub_count'] += 1
+                                        msg = f"외화 한글 자막 누락 (파일명에 [{hardsub_tag}] 태그 감지: 영상 자체자막일 수 있음)"
+                                    else:
+                                        msg = f"외화 한글 자막 누락 ({full_title})"
+
                                     missing_log = {
                                         'status': status,
                                         'mode': 'db',
                                         'ret': {'log_type': 'MISSING_KOREAN'},
                                         'title': full_title,
                                         'video_file': video_file,
+                                        'hardsub_tag': hardsub_tag,
                                         'section_type': section_type,
-                                        'msg': f"외화 한글 자막 누락 ({full_title})"
+                                        'msg': msg
                                     }
                                     notify(missing_log)
                         except Exception as e:

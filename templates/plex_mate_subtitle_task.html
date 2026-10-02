@@ -124,7 +124,11 @@ function make_one(data) {
       row += j_info_text("구분", text_color("[외화 한글자막 누락]", 'orange'));
       row += j_info_text("컨텐츠 제목", text_color(data.title, 'blue'));
       row += j_info_text("비디오 파일", data.video_file);
-      row += j_info_text("진단 결과", text_color("한글 자막 없음 (외부 자막 부재, 내부 한글 자막 없음, 자체자막 태그 없음)", 'darkorange'));
+      if (data.hardsub_tag) {
+        row += j_info_text("진단 결과", text_color("한글 자막 없음 ", 'darkorange') + text_color(`[파일명 '${data.hardsub_tag}' 감지: 영상 자체자막일 가능성 있음]`, 'teal'));
+      } else {
+        row += j_info_text("진단 결과", text_color("한글 자막 없음 (외부/내부 한글 자막 및 디스크 자막 부재)", 'darkorange'));
+      }
     } else if (ret_type == 'FOUND_DISK_SUB') {
       row += j_info_text("구분", text_color("[디스크 자막 발견 및 새로고침]", 'teal'));
       row += j_info_text("컨텐츠 제목", text_color(data.title, 'blue'));
@@ -216,9 +220,11 @@ function make_status(data) {
     if (data.sub_mode != 'dead_sub') {
       if (data.db_total_media_count > 0 || data.db_checked_media_count > 0 || data.sub_mode == 'missing_sub') {
         str += j_info_text2("영상 미디어 검사", (data.db_checked_media_count || 0) + ' / ' + (data.db_total_media_count || 0));
-        str += j_info_text2("자체자막(하드서브) 인정", text_color(data.db_hardsub_count || 0, 'green'), 1);
         str += j_info_text2("디스크 자막 발견 (새로고침)", text_color(data.db_found_disk_sub_count || 0, 'info'), 1);
         str += j_info_text2("외화 한글자막 누락", text_color(data.db_missing_korean_count || 0, (data.db_missing_korean_count > 0 ? 'danger' : 'black')), 1);
+        if (data.db_hardsub_count > 0) {
+          str += j_info_text2("- 자체자막(SW/ST/KOR) 추정", text_color(data.db_hardsub_count || 0, 'teal'), 2);
+        }
         if (data.sub_mode == 'missing_sub') {
           str += j_info_text2("메타 새로고침 수", text_color(data.db_meta_refresh_count || 0, 'primary'), 1);
         }
