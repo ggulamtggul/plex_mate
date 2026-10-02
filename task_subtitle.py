@@ -500,16 +500,18 @@ class Task(object):
                     notify({'status': status, 'mode': 'db', 'ret': {}})
 
                     # 해당 라이브러리의 모든 자막 스트림(stream_type_id = 3) 조회하여 media_item_id별 매핑
+                    # 내장 자막은 media_part_id에 연결되어 있으므로 media_parts를 통해 조인
                     streams_query = """
-                    SELECT 
+                    SELECT DISTINCT
                         media_streams.id AS stream_id,
-                        media_streams.media_item_id AS media_item_id,
+                        media_parts.media_item_id AS media_item_id,
                         media_streams.url AS url,
                         media_streams.codec AS codec,
                         media_streams.language AS language,
                         media_streams.extra_data AS extra_data
                     FROM media_streams
-                    JOIN media_items ON media_streams.media_item_id = media_items.id
+                    JOIN media_parts ON (media_streams.media_part_id = media_parts.id OR media_streams.media_item_id = media_parts.media_item_id)
+                    JOIN media_items ON media_parts.media_item_id = media_items.id
                     JOIN metadata_items ON media_items.metadata_item_id = metadata_items.id
                     WHERE media_streams.stream_type_id = 3
                       AND metadata_items.library_section_id = ?
@@ -574,13 +576,19 @@ class Task(object):
 
                                 lang = (st.get('language') or '').strip().lower()
                                 url = st.get('url') or ''
+                                extra_data = (st.get('extra_data') or '').lower()
 
-                                # 1) 언어 코드가 한국어인 경우
-                                if lang in korean_langs:
+                                # 1) language 컬럼 검사 (ko, kor, korean, 한국어 등)
+                                if lang in korean_langs or any(k in lang for k in ['한국', 'korean', 'kor']):
                                     has_korean_sub = True
                                     break
 
-                                # 2) 외부 자막인 경우 파일명 또는 단일 자막 검사
+                                # 2) extra_data 컬럼 검사 (languageCode=kor, languageTag=ko-KR, title 등)
+                                if any(k in extra_data for k in ['kor', 'ko-kr', '한국', 'korean']):
+                                    has_korean_sub = True
+                                    break
+
+                                # 3) 외부 자막인 경우 파일명 또는 단일 자막 검사
                                 if url != '':
                                     sub_disk_path = get_disk_path(url)
                                     if sub_disk_path:
