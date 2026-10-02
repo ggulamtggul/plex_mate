@@ -4,7 +4,7 @@ import re
 import sqlite3
 import traceback
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from .plex_bin_scanner import PlexBinaryScanner
 from .plex_db import PlexDBHandle, dict_factory
@@ -190,32 +190,12 @@ class Task(object):
 
     @staticmethod
     def start_db(self, section_id, section_location):
-        db_file = P.ModelSetting.get('base_path_db')
-        con = sqlite3.connect(db_file)
-        cur = con.cursor()
-
-        library_section = PlexDBHandle.library_section(section_id)
-        if not library_section:
-            logger.error(f"[DB기준] 라이브러리 섹션을 찾을 수 없습니다: {section_id}")
-            con.close()
-            return 'wait'
-
-        section_name = library_section.get('name', '')
-        section_type = 'movie' if library_section.get('section_type') == 1 else 'show'
-
-        locations = PlexDBHandle.section_location(library_id=section_id)
-        selected_location = None
-        if section_location != 'all':
-            for tmp in locations:
-                if tmp['root_path'] == section_location:
-                    selected_location = tmp['root_path']
-                    break
-
+        con = None
         status = {
             'is_working': 'run',
             'mode': 'db',
-            'section_name': section_name,
-            'section_type': section_type,
+            'section_name': '',
+            'section_type': 'movie',
             'db_total_sub_count': 0,
             'db_checked_sub_count': 0,
             'db_normal_sub_count': 0,
@@ -229,345 +209,414 @@ class Task(object):
         }
 
         def notify(data):
-            if F.config['use_celery']:
-                self.update_state(state='PROGRESS', meta=data)
-            else:
-                self.receive_from_task(data, celery=False)
-
-        notify({'status': status, 'mode': 'db', 'ret': {}})
-
-        # -----------------------------------------------------------------
-        # 1단계: 외부 자막(External Subtitle) 죽은 자막 병렬 탐지
-        # -----------------------------------------------------------------
-        sub_query = """
-        SELECT 
-            media_streams.id AS stream_id,
-            media_streams.url AS stream_url,
-            media_streams.codec AS stream_codec,
-            media_streams.language AS stream_language,
-            media_parts.id AS part_id,
-            media_parts.file AS video_file,
-            media_items.id AS media_item_id,
-            metadata_items.id AS metadata_item_id,
-            metadata_items.parent_id AS parent_id,
-            metadata_items.metadata_type AS metadata_type,
-            metadata_items.title AS title
-        FROM media_streams
-        JOIN media_items ON media_streams.media_item_id = media_items.id
-        JOIN media_parts ON media_items.id = media_parts.media_item_id
-        JOIN metadata_items ON media_items.metadata_item_id = metadata_items.id
-        WHERE media_streams.stream_type_id = 3
-          AND media_streams.url IS NOT NULL 
-          AND media_streams.url != ''
-          AND metadata_items.library_section_id = ?
-        """
-        params = [section_id]
-        if selected_location:
-            sub_query += " AND media_parts.file LIKE ?"
-            params.append(f"{selected_location}%")
-
-        ce = con.execute(sub_query, tuple(params))
-        ce.row_factory = dict_factory
-        subtitle_rows = ce.fetchall()
-
-        status['db_total_sub_count'] = len(subtitle_rows)
-        notify({'status': status, 'mode': 'db', 'ret': {}})
-
-        def get_disk_path(stream_url):
-            if not stream_url:
-                return None
-            if stream_url.startswith('file://'):
-                path = stream_url[7:]
-            else:
-                path = stream_url
-            return urllib.parse.unquote(path)
-
-        season_to_show = {}
-        def get_show_info(season_id):
-            if season_id in season_to_show:
-                return season_to_show[season_id]
             try:
-                c = con.execute("SELECT id, parent_id, metadata_type, title FROM metadata_items WHERE id = ?", (season_id,))
-                c.row_factory = dict_factory
-                row = c.fetchone()
-                if not row:
-                    season_to_show[season_id] = (None, None)
-                    return None, None
-                if row['metadata_type'] == 2:
-                    res = (row['id'], row['title'])
+                if F.config['use_celery']:
+                    self.update_state(state='PROGRESS', meta=data)
                 else:
-                    c2 = con.execute("SELECT id, title FROM metadata_items WHERE id = ?", (row['parent_id'],))
-                    c2.row_factory = dict_factory
-                    show_row = c2.fetchone()
-                    if show_row:
-                        res = (show_row['id'], show_row['title'])
-                    else:
-                        res = (row['parent_id'], row['title'])
-                season_to_show[season_id] = res
-                return res
+                    self.receive_from_task(data, celery=False)
             except Exception as e:
-                logger.error(f"get_show_info error: {str(e)}")
-                return None, None
+                logger.error(f"[DB기준] notify 에러: {str(e)}")
 
-        refresh_movie_ids = {} # {metadata_item_id: title}
-        refresh_show_ids = {}  # {show_id: show_title}
-        dead_stream_ids = set()
+        try:
+            db_file = P.ModelSetting.get('base_path_db')
+            con = sqlite3.connect(db_file)
+            cur = con.cursor()
 
-        def check_sub_exist(sub_row):
-            disk_path = get_disk_path(sub_row['stream_url'])
-            exists = os.path.exists(disk_path) if disk_path else False
-            return sub_row, disk_path, exists
+            library_section = PlexDBHandle.library_section(section_id)
+            if not library_section:
+                logger.error(f"[DB기준] 라이브러리 섹션을 찾을 수 없습니다: {section_id}")
+                return 'wait'
 
-        chunk_size = 100
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            for i in range(0, len(subtitle_rows), chunk_size):
-                if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
-                    status['is_working'] = 'stop'
-                    notify({'status': status, 'mode': 'db', 'ret': {}})
-                    con.close()
-                    return 'stop'
+            section_name = library_section.get('name', '')
+            section_type = 'movie' if library_section.get('section_type') == 1 else 'show'
+            status['section_name'] = section_name
+            status['section_type'] = section_type
 
-                chunk = subtitle_rows[i:i+chunk_size]
-                results = list(executor.map(check_sub_exist, chunk))
+            locations = PlexDBHandle.section_location(library_id=section_id)
+            selected_location = None
+            if section_location != 'all':
+                for tmp in locations:
+                    if tmp['root_path'] == section_location:
+                        selected_location = tmp['root_path']
+                        break
 
-                for sub_row, disk_path, exists in results:
-                    status['db_checked_sub_count'] += 1
-                    if exists:
-                        status['db_normal_sub_count'] += 1
-                    else:
-                        status['db_dead_sub_count'] += 1
-                        dead_stream_ids.add(sub_row['stream_id'])
-
-                        # 새로고침 타겟 등록
-                        if sub_row['metadata_type'] == 1:
-                            refresh_movie_ids[sub_row['metadata_item_id']] = sub_row['title']
-                        elif sub_row['metadata_type'] == 4:
-                            show_id, show_title = get_show_info(sub_row['parent_id'])
-                            if show_id:
-                                refresh_show_ids[show_id] = show_title
-
-                        dead_log = {
-                            'status': status,
-                            'mode': 'db',
-                            'ret': {'log_type': 'DEAD'},
-                            'title': sub_row['title'],
-                            'video_file': sub_row['video_file'],
-                            'dead_subtitle_path': disk_path,
-                            'stream_id': sub_row['stream_id'],
-                            'section_type': section_type
-                        }
-                        notify(dead_log)
-
-                notify({'status': status, 'mode': 'db', 'ret': {}})
-
-        # -----------------------------------------------------------------
-        # 2단계: 죽은 자막 메타 새로고침 (쇼/영화 단위 중복 없이 일괄 호출)
-        # -----------------------------------------------------------------
-        if refresh_movie_ids or refresh_show_ids:
-            status['current_step'] = f"2단계: 메타 새로고침 (영화 {len(refresh_movie_ids)}편, TV쇼 {len(refresh_show_ids)}개)"
             notify({'status': status, 'mode': 'db', 'ret': {}})
 
-            for m_id, m_title in refresh_movie_ids.items():
-                if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
-                    status['is_working'] = 'stop'
-                    notify({'status': status, 'mode': 'db', 'ret': {}})
-                    con.close()
-                    return 'stop'
-                logger.warning(f"[DB기준] 영화 메타 새로고침: {m_title} (ID: {m_id})")
-                PlexWebHandle.refresh_by_id(m_id)
-                status['db_meta_refresh_count'] += 1
-                notify({
-                    'status': status,
-                    'mode': 'db',
-                    'ret': {'log_type': 'REFRESH'},
-                    'title': m_title,
-                    'target_id': m_id,
-                    'section_type': 'movie',
-                    'msg': f"영화 메타 새로고침 요청 완료 ({m_title})"
-                })
-
-            for s_id, s_title in refresh_show_ids.items():
-                if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
-                    status['is_working'] = 'stop'
-                    notify({'status': status, 'mode': 'db', 'ret': {}})
-                    con.close()
-                    return 'stop'
-                logger.warning(f"[DB기준] TV쇼 메타 새로고침: {s_title} (ID: {s_id})")
-                PlexWebHandle.refresh_by_id(s_id)
-                status['db_meta_refresh_count'] += 1
-                notify({
-                    'status': status,
-                    'mode': 'db',
-                    'ret': {'log_type': 'REFRESH'},
-                    'title': s_title,
-                    'target_id': s_id,
-                    'section_type': 'show',
-                    'msg': f"TV 쇼 메타 새로고침 요청 완료 ({s_title})"
-                })
-
-        # -----------------------------------------------------------------
-        # 3단계: 외화 한글 자막 누락 진단 및 자체자막(하드서브) 회피
-        # -----------------------------------------------------------------
-        is_korean_section = ('한국' in section_name or '국내' in section_name)
-        if is_korean_section:
-            status['current_step'] = f"3단계: 한국 컨텐츠 라이브러리('{section_name}')이므로 자막 누락 진단을 건너뜁니다."
-            notify({'status': status, 'mode': 'db', 'ret': {}})
-        else:
-            status['current_step'] = "3단계: 외화 컨텐츠 한글 자막 누락 및 자체자막 진단"
-            notify({'status': status, 'mode': 'db', 'ret': {}})
-
-            media_query = """
+            # -----------------------------------------------------------------
+            # 1단계: 외부 자막(External Subtitle) 죽은 자막 병렬 탐지
+            # -----------------------------------------------------------------
+            sub_query = """
             SELECT 
+                media_streams.id AS stream_id,
+                media_streams.url AS stream_url,
+                media_streams.codec AS stream_codec,
+                media_streams.language AS stream_language,
+                media_parts.id AS part_id,
+                media_parts.file AS video_file,
+                media_items.id AS media_item_id,
                 metadata_items.id AS metadata_item_id,
                 metadata_items.parent_id AS parent_id,
                 metadata_items.metadata_type AS metadata_type,
-                metadata_items.title AS title,
-                metadata_items.year AS year,
-                metadata_items.tags_country AS tags_country,
-                media_items.id AS media_item_id,
-                media_parts.id AS part_id,
-                media_parts.file AS video_file
-            FROM metadata_items
-            JOIN media_items ON metadata_items.id = media_items.metadata_item_id
-            JOIN media_parts ON media_items.id = media_parts.media_item_id
-            WHERE metadata_items.library_section_id = ?
-              AND metadata_items.metadata_type IN (1, 4)
-            """
-            m_params = [section_id]
-            if selected_location:
-                media_query += " AND media_parts.file LIKE ?"
-                m_params.append(f"{selected_location}%")
-
-            ce = con.execute(media_query, tuple(m_params))
-            ce.row_factory = dict_factory
-            media_rows = ce.fetchall()
-
-            status['db_total_media_count'] = len(media_rows)
-            notify({'status': status, 'mode': 'db', 'ret': {}})
-
-            # 해당 라이브러리의 모든 자막 스트림(stream_type_id = 3) 조회하여 media_item_id별 매핑
-            streams_query = """
-            SELECT 
-                media_streams.id AS stream_id,
-                media_streams.media_item_id AS media_item_id,
-                media_streams.url AS url,
-                media_streams.codec AS codec,
-                media_streams.language AS language,
-                media_streams.extra_data AS extra_data
+                metadata_items.title AS title
             FROM media_streams
             JOIN media_items ON media_streams.media_item_id = media_items.id
+            JOIN media_parts ON media_items.id = media_parts.media_item_id
             JOIN metadata_items ON media_items.metadata_item_id = metadata_items.id
             WHERE media_streams.stream_type_id = 3
+              AND media_streams.url IS NOT NULL 
+              AND media_streams.url != ''
               AND metadata_items.library_section_id = ?
             """
-            ce = con.execute(streams_query, (section_id,))
+            params = [section_id]
+            if selected_location:
+                sub_query += " AND media_parts.file LIKE ?"
+                params.append(f"{selected_location}%")
+
+            ce = con.execute(sub_query, tuple(params))
             ce.row_factory = dict_factory
-            all_streams = ce.fetchall()
+            subtitle_rows = ce.fetchall()
 
-            media_streams_map = {}
-            for st in all_streams:
-                m_id = st['media_item_id']
-                if m_id not in media_streams_map:
-                    media_streams_map[m_id] = []
-                media_streams_map[m_id].append(st)
+            status['db_total_sub_count'] = len(subtitle_rows)
+            notify({'status': status, 'mode': 'db', 'ret': {}})
 
-            def is_hardsub(video_file):
-                if not video_file:
-                    return False
-                fname = os.path.basename(video_file)
-                stem, _ = os.path.splitext(fname)
-                # 1. 파일명에 ST 또는 SW (단어 경계 또는 끝자리, 예: -SW, .SW, _SW, -ST, .ST, _ST 등)
-                if re.search(r'[\.\-_](ST|SW)($|[\.\-_])', stem, re.IGNORECASE):
-                    return True
-                # 2. 파일명에 KOR 또는 자체자막 포함 (예: .KOR., -KOR-, [KOR], [자체자막] 등)
-                if re.search(r'(^|[\.\s_\-\[\(])(KOR|자체자막)($|[\.\s_\-\]\)])', stem, re.IGNORECASE):
-                    return True
-                return False
+            def get_disk_path(stream_url):
+                if not stream_url:
+                    return None
+                if stream_url.startswith('file://'):
+                    path = stream_url[7:]
+                else:
+                    path = stream_url
+                return urllib.parse.unquote(path)
 
-            korean_langs = {'ko', 'kor', 'korean', '한국어'}
-            korean_countries = {'한국', '대한민국', 'korea', 'south korea', 'republic of korea'}
+            season_to_show = {}
+            def get_show_info(season_id):
+                if season_id in season_to_show:
+                    return season_to_show[season_id]
+                try:
+                    c = con.execute("SELECT id, parent_id, metadata_type, title FROM metadata_items WHERE id = ?", (season_id,))
+                    c.row_factory = dict_factory
+                    row = c.fetchone()
+                    if not row:
+                        season_to_show[season_id] = (None, None)
+                        return None, None
+                    if row['metadata_type'] == 2:
+                        res = (row['id'], row['title'])
+                    else:
+                        c2 = con.execute("SELECT id, title FROM metadata_items WHERE id = ?", (row['parent_id'],))
+                        c2.row_factory = dict_factory
+                        show_row = c2.fetchone()
+                        if show_row:
+                            res = (show_row['id'], show_row['title'])
+                        else:
+                            res = (row['parent_id'], row['title'])
+                    season_to_show[season_id] = res
+                    return res
+                except Exception as e:
+                    logger.error(f"get_show_info error: {str(e)}")
+                    return None, None
 
-            for row_idx, m_row in enumerate(media_rows):
-                if row_idx % 200 == 0:
+            refresh_movie_ids = {} # {metadata_item_id: title}
+            refresh_show_ids = {}  # {show_id: show_title}
+            dead_stream_ids = set()
+
+            def check_sub_exist(sub_row):
+                disk_path = None
+                try:
+                    disk_path = get_disk_path(sub_row.get('stream_url', ''))
+                    if not disk_path:
+                        return sub_row, disk_path, False
+                    exists = os.path.exists(disk_path)
+                    return sub_row, disk_path, exists
+                except Exception as e:
+                    logger.error(f"[DB기준] 자막 경로 검사 오류: {disk_path} - {str(e)}")
+                    return sub_row, disk_path, False
+
+            chunk_size = 50
+            max_workers = 8
+            timeout_sec = 5
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for i in range(0, len(subtitle_rows), chunk_size):
                     if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
                         status['is_working'] = 'stop'
                         notify({'status': status, 'mode': 'db', 'ret': {}})
-                        con.close()
                         return 'stop'
-                    notify({'status': status, 'mode': 'db', 'ret': {}})
 
-                status['db_checked_media_count'] += 1
-                video_file = m_row.get('video_file', '')
+                    chunk = subtitle_rows[i:i+chunk_size]
+                    future_to_row = {executor.submit(check_sub_exist, row): row for row in chunk}
 
-                # 0. 메타데이터 국가(Country)가 한국인 컨텐츠는 자막 검사 제외 (통합 라이브러리 오탐 방지)
-                tags_country = (m_row.get('tags_country') or '').lower()
-                if any(k in tags_country for k in korean_countries):
-                    continue
+                    for future in as_completed(future_to_row):
+                        sub_row = future_to_row[future]
+                        status['db_checked_sub_count'] += 1
 
-                # 1. 자체자막(Hardsub) 검사 (오직 파일명만 검사)
-                if is_hardsub(video_file):
-                    status['db_hardsub_count'] += 1
-                    continue
+                        try:
+                            _, disk_path, exists = future.result(timeout=timeout_sec)
+                        except TimeoutError:
+                            logger.warning(f"[DB기준] 자막 파일 검사 타임아웃(5초 초과): {sub_row.get('stream_url')}")
+                            disk_path = get_disk_path(sub_row.get('stream_url', ''))
+                            exists = False
+                        except Exception as e:
+                            logger.error(f"[DB기준] 자막 future 예외: {str(e)}")
+                            disk_path = get_disk_path(sub_row.get('stream_url', ''))
+                            exists = False
 
-                # 2. 한글 자막 스트림 보유 여부 검사
-                m_streams = media_streams_map.get(m_row['media_item_id'], [])
-                has_korean_sub = False
+                        if exists:
+                            status['db_normal_sub_count'] += 1
+                        else:
+                            status['db_dead_sub_count'] += 1
+                            dead_stream_ids.add(sub_row['stream_id'])
 
-                for st in m_streams:
-                    # 죽은 자막으로 확인된 것은 제외
-                    if st['stream_id'] in dead_stream_ids:
-                        continue
+                            # 새로고침 타겟 등록
+                            if sub_row['metadata_type'] == 1:
+                                refresh_movie_ids[sub_row['metadata_item_id']] = sub_row['title']
+                            elif sub_row['metadata_type'] == 4:
+                                show_id, show_title = get_show_info(sub_row['parent_id'])
+                                if show_id:
+                                    refresh_show_ids[show_id] = show_title
 
-                    lang = (st.get('language') or '').strip().lower()
-                    url = st.get('url') or ''
+                            dead_log = {
+                                'status': status,
+                                'mode': 'db',
+                                'ret': {'log_type': 'DEAD'},
+                                'title': sub_row['title'],
+                                'video_file': sub_row['video_file'],
+                                'dead_subtitle_path': disk_path,
+                                'stream_id': sub_row['stream_id'],
+                                'section_type': section_type
+                            }
+                            notify(dead_log)
 
-                    # 1) 언어 코드가 한국어인 경우
-                    if lang in korean_langs:
-                        has_korean_sub = True
-                        break
+                        # 10개마다 또는 마지막에 실시간 진행 상황 브로드캐스트
+                        if status['db_checked_sub_count'] % 10 == 0 or status['db_checked_sub_count'] == status['db_total_sub_count']:
+                            notify({'status': status, 'mode': 'db', 'ret': {}})
 
-                    # 2) 외부 자막인 경우 파일명 또는 단일 자막 검사
-                    if url != '':
-                        sub_disk_path = get_disk_path(url)
-                        if sub_disk_path:
-                            sub_fname = os.path.basename(sub_disk_path).lower()
-                            if any(k in sub_fname for k in ['.ko.', '.kor.', '_ko.', '_kor.', '.korean.', '한글']):
+            # -----------------------------------------------------------------
+            # 2단계: 죽은 자막 메타 새로고침 (쇼/영화 단위 중복 없이 일괄 호출)
+            # -----------------------------------------------------------------
+            if refresh_movie_ids or refresh_show_ids:
+                status['current_step'] = f"2단계: 메타 새로고침 (영화 {len(refresh_movie_ids)}편, TV쇼 {len(refresh_show_ids)}개)"
+                notify({'status': status, 'mode': 'db', 'ret': {}})
+
+                for m_id, m_title in refresh_movie_ids.items():
+                    if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
+                        status['is_working'] = 'stop'
+                        notify({'status': status, 'mode': 'db', 'ret': {}})
+                        return 'stop'
+                    try:
+                        logger.warning(f"[DB기준] 영화 메타 새로고침: {m_title} (ID: {m_id})")
+                        PlexWebHandle.refresh_by_id(m_id)
+                        status['db_meta_refresh_count'] += 1
+                        notify({
+                            'status': status,
+                            'mode': 'db',
+                            'ret': {'log_type': 'REFRESH'},
+                            'title': m_title,
+                            'target_id': m_id,
+                            'section_type': 'movie',
+                            'msg': f"영화 메타 새로고침 요청 완료 ({m_title})"
+                        })
+                    except Exception as e:
+                        logger.error(f"[DB기준] 영화 메타 새로고침 실패: {m_title} - {str(e)}")
+
+                for s_id, s_title in refresh_show_ids.items():
+                    if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
+                        status['is_working'] = 'stop'
+                        notify({'status': status, 'mode': 'db', 'ret': {}})
+                        return 'stop'
+                    try:
+                        logger.warning(f"[DB기준] TV쇼 메타 새로고침: {s_title} (ID: {s_id})")
+                        PlexWebHandle.refresh_by_id(s_id)
+                        status['db_meta_refresh_count'] += 1
+                        notify({
+                            'status': status,
+                            'mode': 'db',
+                            'ret': {'log_type': 'REFRESH'},
+                            'title': s_title,
+                            'target_id': s_id,
+                            'section_type': 'show',
+                            'msg': f"TV 쇼 메타 새로고침 요청 완료 ({s_title})"
+                        })
+                    except Exception as e:
+                        logger.error(f"[DB기준] TV쇼 메타 새로고침 실패: {s_title} - {str(e)}")
+
+            # -----------------------------------------------------------------
+            # 3단계: 외화 한글 자막 누락 진단 및 자체자막(하드서브) 회피
+            # -----------------------------------------------------------------
+            is_korean_section = ('한국' in section_name or '국내' in section_name)
+            if is_korean_section:
+                status['current_step'] = f"3단계: 한국 컨텐츠 라이브러리('{section_name}')이므로 자막 누락 진단을 건너뜁니다."
+                notify({'status': status, 'mode': 'db', 'ret': {}})
+            else:
+                status['current_step'] = "3단계: 외화 컨텐츠 한글 자막 누락 및 자체자막 진단"
+                notify({'status': status, 'mode': 'db', 'ret': {}})
+
+                media_query = """
+                SELECT 
+                    metadata_items.id AS metadata_item_id,
+                    metadata_items.parent_id AS parent_id,
+                    metadata_items.metadata_type AS metadata_type,
+                    metadata_items.title AS title,
+                    metadata_items.year AS year,
+                    metadata_items.tags_country AS tags_country,
+                    media_items.id AS media_item_id,
+                    media_parts.id AS part_id,
+                    media_parts.file AS video_file
+                FROM metadata_items
+                JOIN media_items ON metadata_items.id = media_items.metadata_item_id
+                JOIN media_parts ON media_items.id = media_parts.media_item_id
+                WHERE metadata_items.library_section_id = ?
+                  AND metadata_items.metadata_type IN (1, 4)
+                """
+                m_params = [section_id]
+                if selected_location:
+                    media_query += " AND media_parts.file LIKE ?"
+                    m_params.append(f"{selected_location}%")
+
+                ce = con.execute(media_query, tuple(m_params))
+                ce.row_factory = dict_factory
+                media_rows = ce.fetchall()
+
+                status['db_total_media_count'] = len(media_rows)
+                notify({'status': status, 'mode': 'db', 'ret': {}})
+
+                # 해당 라이브러리의 모든 자막 스트림(stream_type_id = 3) 조회하여 media_item_id별 매핑
+                streams_query = """
+                SELECT 
+                    media_streams.id AS stream_id,
+                    media_streams.media_item_id AS media_item_id,
+                    media_streams.url AS url,
+                    media_streams.codec AS codec,
+                    media_streams.language AS language,
+                    media_streams.extra_data AS extra_data
+                FROM media_streams
+                JOIN media_items ON media_streams.media_item_id = media_items.id
+                JOIN metadata_items ON media_items.metadata_item_id = metadata_items.id
+                WHERE media_streams.stream_type_id = 3
+                  AND metadata_items.library_section_id = ?
+                """
+                ce = con.execute(streams_query, (section_id,))
+                ce.row_factory = dict_factory
+                all_streams = ce.fetchall()
+
+                media_streams_map = {}
+                for st in all_streams:
+                    m_id = st['media_item_id']
+                    if m_id not in media_streams_map:
+                        media_streams_map[m_id] = []
+                    media_streams_map[m_id].append(st)
+
+                def is_hardsub(video_file):
+                    if not video_file:
+                        return False
+                    fname = os.path.basename(video_file)
+                    stem, _ = os.path.splitext(fname)
+                    # 1. 파일명에 ST 또는 SW (단어 경계 또는 끝자리, 예: -SW, .SW, _SW, -ST, .ST, _ST 등)
+                    if re.search(r'[\.\-_](ST|SW)($|[\.\-_])', stem, re.IGNORECASE):
+                        return True
+                    # 2. 파일명에 KOR 또는 자체자막 포함 (예: .KOR., -KOR-, [KOR], [자체자막] 등)
+                    if re.search(r'(^|[\.\s_\-\[\(])(KOR|자체자막)($|[\.\s_\-\]\)])', stem, re.IGNORECASE):
+                        return True
+                    return False
+
+                korean_langs = {'ko', 'kor', 'korean', '한국어'}
+                korean_countries = {'한국', '대한민국', 'korea', 'south korea', 'republic of korea'}
+
+                for row_idx, m_row in enumerate(media_rows):
+                    if row_idx % 50 == 0:
+                        if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
+                            status['is_working'] = 'stop'
+                            notify({'status': status, 'mode': 'db', 'ret': {}})
+                            return 'stop'
+                        notify({'status': status, 'mode': 'db', 'ret': {}})
+
+                    status['db_checked_media_count'] += 1
+                    video_file = m_row.get('video_file', '')
+
+                    try:
+                        # 0. 메타데이터 국가(Country)가 한국인 컨텐츠는 자막 검사 제외 (통합 라이브러리 오탐 방지)
+                        tags_country = (m_row.get('tags_country') or '').lower()
+                        if any(k in tags_country for k in korean_countries):
+                            continue
+
+                        # 1. 자체자막(Hardsub) 검사 (오직 파일명만 검사)
+                        if is_hardsub(video_file):
+                            status['db_hardsub_count'] += 1
+                            continue
+
+                        # 2. 한글 자막 스트림 보유 여부 검사
+                        m_streams = media_streams_map.get(m_row['media_item_id'], [])
+                        has_korean_sub = False
+
+                        for st in m_streams:
+                            # 죽은 자막으로 확인된 것은 제외
+                            if st['stream_id'] in dead_stream_ids:
+                                continue
+
+                            lang = (st.get('language') or '').strip().lower()
+                            url = st.get('url') or ''
+
+                            # 1) 언어 코드가 한국어인 경우
+                            if lang in korean_langs:
                                 has_korean_sub = True
                                 break
 
-                # 외화인데 외부 자막이 등록되어 있고 1개만 존재하는 경우도 한글 자막으로 인정
-                if not has_korean_sub and len(m_streams) > 0:
-                    valid_ext_subs = [s for s in m_streams if s.get('url') and s['stream_id'] not in dead_stream_ids]
-                    if len(valid_ext_subs) == 1:
-                        has_korean_sub = True
+                            # 2) 외부 자막인 경우 파일명 또는 단일 자막 검사
+                            if url != '':
+                                sub_disk_path = get_disk_path(url)
+                                if sub_disk_path:
+                                    sub_fname = os.path.basename(sub_disk_path).lower()
+                                    if any(k in sub_fname for k in ['.ko.', '.kor.', '_ko.', '_kor.', '.korean.', '한글']):
+                                        has_korean_sub = True
+                                        break
 
-                if not has_korean_sub:
-                    status['db_missing_korean_count'] += 1
-                    full_title = m_row['title']
-                    if m_row['metadata_type'] == 4:
-                        show_id, show_title = get_show_info(m_row['parent_id'])
-                        if show_title:
-                            full_title = f"{show_title} - {m_row['title']}"
+                        # 외화인데 외부 자막이 등록되어 있고 1개만 존재하는 경우도 한글 자막으로 인정
+                        if not has_korean_sub and len(m_streams) > 0:
+                            valid_ext_subs = [s for s in m_streams if s.get('url') and s['stream_id'] not in dead_stream_ids]
+                            if len(valid_ext_subs) == 1:
+                                has_korean_sub = True
 
-                    missing_log = {
-                        'status': status,
-                        'mode': 'db',
-                        'ret': {'log_type': 'MISSING_KOREAN'},
-                        'title': full_title,
-                        'video_file': video_file,
-                        'section_type': section_type,
-                        'msg': f"외화 한글 자막 누락 ({full_title})"
-                    }
-                    notify(missing_log)
+                        if not has_korean_sub:
+                            status['db_missing_korean_count'] += 1
+                            full_title = m_row['title']
+                            if m_row['metadata_type'] == 4:
+                                show_id, show_title = get_show_info(m_row['parent_id'])
+                                if show_title:
+                                    full_title = f"{show_title} - {m_row['title']}"
 
-        # -----------------------------------------------------------------
-        # 완료
-        # -----------------------------------------------------------------
-        status['current_step'] = '모든 검사가 완료되었습니다.'
-        status['is_working'] = 'wait'
-        notify({'status': status, 'mode': 'db', 'ret': {}})
-        con.close()
-        return 'wait'
+                            missing_log = {
+                                'status': status,
+                                'mode': 'db',
+                                'ret': {'log_type': 'MISSING_KOREAN'},
+                                'title': full_title,
+                                'video_file': video_file,
+                                'section_type': section_type,
+                                'msg': f"외화 한글 자막 누락 ({full_title})"
+                            }
+                            notify(missing_log)
+                    except Exception as e:
+                        logger.error(f"[DB기준] 미디어({m_row.get('title')}) 검사 오류: {str(e)}")
+
+            # -----------------------------------------------------------------
+            # 완료
+            # -----------------------------------------------------------------
+            status['current_step'] = '모든 검사가 완료되었습니다.'
+            status['is_working'] = 'wait'
+            notify({'status': status, 'mode': 'db', 'ret': {}})
+            return 'wait'
+
+        except Exception as e:
+            logger.error(f"[DB기준] Task.start_db 오류 발생: {str(e)}")
+            logger.error(traceback.format_exc())
+            status['current_step'] = f'오류 발생으로 중단됨: {str(e)}'
+            status['is_working'] = 'wait'
+            notify({'status': status, 'mode': 'db', 'ret': {}})
+            return 'wait'
+        finally:
+            if con:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
     """
     - 니미 일드에서 에피소드별 메타 새로고침으로 자막 갱신되지 않음. 중드, 외국 다큐, 예능에는 문제 없없음. 버리기 아까운데........
