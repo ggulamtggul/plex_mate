@@ -232,26 +232,28 @@ function socket_init(package_name, sub) {
   
 
   socket.on('refresh_one', function(data){
-    one = make_one(data.one);
-    //if (row == null)
-    //  return;
     make_status(data.status);
-    id = 'data_'+data.one.index;
+    if (!data.one) return;
+
+    var one = make_one(data.one);
+    var id = 'data_' + data.one.index;
     if ($('#' + id).length) {
       $('#' + id).html(one);
-      current_data.list[parseInt(data.one.index)] = data.one;
-    } else {
-      if (id == 'data_0') {
-
+      if (current_data && current_data.list) {
+        current_data.list[parseInt(data.one.index)] = data.one;
       }
-      row = '<div id="' + id + '">' + row + '</div>';
-      document.getElementById("list_div").innerHTML += j_hr() + one;
-      if (current_data == null)
-          current_data = []
-      if (current_data.list == null)
-          current_data.list = []
+    } else {
+      var itemHtml = '<div id="' + id + '" style="margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed #666;">' + one + '</div>';
+      $('#list_div').prepend(itemHtml);
+
+      // DOM 노드 200개 초과 시 오래된 노드 삭제 (메모리 및 브라우저 프리징 방지)
+      if ($('#list_div > div').length > 200) {
+        $('#list_div > div:last-child').remove();
+      }
+
+      if (current_data == null) current_data = {};
+      if (current_data.list == null) current_data.list = [];
       current_data.list.push(data.one);
-      //[parseInt(data.index)] = data;
     }
   });
 
@@ -261,18 +263,19 @@ function socket_init(package_name, sub) {
 
 function make_list(data2) {
   current_data = data2;
-  
   data = data2.list;
+  if (!data || data.length == 0) {
+    document.getElementById("list_div").innerHTML = '';
+    return;
+  }
+  // 최신 순으로 최대 200개만 표시하여 브라우저 과부하 방지
+  var display_list = data.slice(-200).reverse();
   str = '';
-  //if (data == null || data.length == 0) str += '<br><h4>목록이 없습니다.</h4>'
-  for (i in data) {
-    row = make_one(data[i]);
-    //if (row == null) continue;
-    str += '<div id="data_' + data[i].index + '">';
+  for (i in display_list) {
+    row = make_one(display_list[i]);
+    str += '<div id="data_' + display_list[i].index + '" style="margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed #666;">';
     str += row;
     str += '</div>';
-    str += j_hr();
-    
   }
   document.getElementById("list_div").innerHTML = str;
 }

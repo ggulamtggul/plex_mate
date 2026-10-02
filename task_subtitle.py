@@ -2,6 +2,7 @@ import fnmatch
 import os
 import re
 import sqlite3
+import time
 import traceback
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
@@ -208,14 +209,19 @@ class Task(object):
             'current_step': '1단계: 외부 자막 무결성 검사 (죽은 자막 탐지)'
         }
 
-        def notify(data):
-            try:
-                if F.config['use_celery']:
-                    self.update_state(state='PROGRESS', meta=data)
-                else:
-                    self.receive_from_task(data, celery=False)
-            except Exception as e:
-                logger.error(f"[DB기준] notify 에러: {str(e)}")
+        last_notify_time = [0.0]
+        def notify(data, force=False):
+            now = time.time()
+            is_log = bool(data.get('ret', {}).get('log_type'))
+            if force or is_log or (now - last_notify_time[0] >= 0.5):
+                last_notify_time[0] = now
+                try:
+                    if F.config['use_celery']:
+                        self.update_state(state='PROGRESS', meta=data)
+                    else:
+                        self.receive_from_task(data, celery=False)
+                except Exception as e:
+                    logger.error(f"[DB기준] notify 에러: {str(e)}")
 
         try:
             db_file = P.ModelSetting.get('base_path_db')
@@ -601,7 +607,7 @@ class Task(object):
             # -----------------------------------------------------------------
             status['current_step'] = '모든 검사가 완료되었습니다.'
             status['is_working'] = 'wait'
-            notify({'status': status, 'mode': 'db', 'ret': {}})
+            notify({'status': status, 'mode': 'db', 'ret': {}}, force=True)
             return 'wait'
 
         except Exception as e:
@@ -609,7 +615,7 @@ class Task(object):
             logger.error(traceback.format_exc())
             status['current_step'] = f'오류 발생으로 중단됨: {str(e)}'
             status['is_working'] = 'wait'
-            notify({'status': status, 'mode': 'db', 'ret': {}})
+            notify({'status': status, 'mode': 'db', 'ret': {}}, force=True)
             return 'wait'
         finally:
             if con:

@@ -22,7 +22,7 @@ class ModuleSubtitle(PluginModuleBase):
             'list' : [],
             'status' : {'is_working':'wait'}
         }
-        self.list_max = 3000
+        self.list_max = 500
         default_route_socketio_module(self, attach='/task')
 
 
