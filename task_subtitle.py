@@ -205,6 +205,7 @@ class Task(object):
             'db_total_media_count': 0,
             'db_checked_media_count': 0,
             'db_hardsub_count': 0,
+            'db_found_disk_sub_count': 0,
             'db_missing_korean_count': 0,
             'current_step': '1단계: 외부 자막 무결성 검사 (죽은 자막 탐지)'
         }
@@ -582,23 +583,64 @@ class Task(object):
                                 has_korean_sub = True
 
                         if not has_korean_sub:
-                            status['db_missing_korean_count'] += 1
+                            # DB에 자막이 없다면, 비디오 파일과 같은 폴더에 자막 파일(ko.srt 등)이 실제로 존재하는지 핀포인트 확인!
+                            dir_path = os.path.dirname(video_file)
+                            base_stem, _ = os.path.splitext(os.path.basename(video_file))
+                            candidate_exts = ['.ko.srt', '.kor.srt', '.ko.smi', '.kor.smi', '.srt', '.smi', '.ko.ass', '.ass']
+
+                            found_disk_sub = None
+                            for sub_ext in candidate_exts:
+                                check_path = os.path.join(dir_path, base_stem + sub_ext)
+                                try:
+                                    if os.path.exists(check_path):
+                                        found_disk_sub = check_path
+                                        break
+                                except Exception:
+                                    pass
+
                             full_title = m_row['title']
+                            refresh_target_id = m_row['metadata_item_id']
                             if m_row['metadata_type'] == 4:
                                 show_id, show_title = get_show_info(m_row['parent_id'])
                                 if show_title:
                                     full_title = f"{show_title} - {m_row['title']}"
+                                if show_id:
+                                    refresh_target_id = show_id
 
-                            missing_log = {
-                                'status': status,
-                                'mode': 'db',
-                                'ret': {'log_type': 'MISSING_KOREAN'},
-                                'title': full_title,
-                                'video_file': video_file,
-                                'section_type': section_type,
-                                'msg': f"외화 한글 자막 누락 ({full_title})"
-                            }
-                            notify(missing_log)
+                            if found_disk_sub:
+                                # 디스크에 자막 파일이 존재함 -> 메타 새로고침 지시하여 Plex DB에 등록 유도!
+                                status['db_found_disk_sub_count'] += 1
+                                try:
+                                    logger.warning(f"[DB기준] 디스크 자막 발견으로 메타 새로고침: {full_title} (자막: {found_disk_sub})")
+                                    PlexWebHandle.refresh_by_id(refresh_target_id)
+                                    status['db_meta_refresh_count'] += 1
+                                except Exception as e:
+                                    logger.error(f"[DB기준] 메타 새로고침 실패: {str(e)}")
+
+                                found_log = {
+                                    'status': status,
+                                    'mode': 'db',
+                                    'ret': {'log_type': 'FOUND_DISK_SUB'},
+                                    'title': full_title,
+                                    'video_file': video_file,
+                                    'found_sub_path': found_disk_sub,
+                                    'section_type': section_type,
+                                    'msg': f"디스크 자막 발견됨 -> 메타 새로고침 지시 완료"
+                                }
+                                notify(found_log)
+                            else:
+                                # 디스크에도 자막이 전혀 없음 -> 진짜 한글 자막 누락 외화
+                                status['db_missing_korean_count'] += 1
+                                missing_log = {
+                                    'status': status,
+                                    'mode': 'db',
+                                    'ret': {'log_type': 'MISSING_KOREAN'},
+                                    'title': full_title,
+                                    'video_file': video_file,
+                                    'section_type': section_type,
+                                    'msg': f"외화 한글 자막 누락 ({full_title})"
+                                }
+                                notify(missing_log)
                     except Exception as e:
                         logger.error(f"[DB기준] 미디어({m_row.get('title')}) 검사 오류: {str(e)}")
 
