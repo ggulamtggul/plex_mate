@@ -1003,13 +1003,14 @@ class Task(object):
                 content = None
                 for enc in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'utf-16']:
                     try:
-                        with open(filepath, 'r', encoding=enc) as f:
+                        with open(filepath, 'r', encoding=enc, errors='ignore') as f:
                             content = f.read(65536)
-                            break
+                            if content and re.search(r'[\uac00-\ud7a3\u3131-\u3163]', content):
+                                break
                     except Exception:
                         pass
                 
-                if content and re.search(r'[\uac00-\ud7a3]', content):
+                if content and re.search(r'[\uac00-\ud7a3\u3131-\u3163]', content):
                     shutil.move(filepath, target_ko_srt)
                     logger.warning(f"[DB smi2srt] 한글 자막 감지되어 .ko.srt로 리네임: {basename} -> {os.path.basename(target_ko_srt)}")
                     return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
