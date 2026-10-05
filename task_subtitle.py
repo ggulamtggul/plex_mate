@@ -5,6 +5,7 @@ import sqlite3
 import time
 import traceback
 import urllib.parse
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from .plex_bin_scanner import PlexBinaryScanner
@@ -207,6 +208,7 @@ class Task(object):
             'db_normal_sub_count': 0,
             'db_dead_sub_count': 0,
             'db_meta_refresh_count': 0,
+            'db_refreshed_items': [],
             'db_total_media_count': 0,
             'db_checked_media_count': 0,
             'db_hardsub_count': 0,
@@ -424,6 +426,17 @@ class Task(object):
                             logger.warning(f"[DB기준] 영화 메타 새로고침: {m_title} (ID: {m_id})")
                             PlexWebHandle.refresh_by_id(m_id)
                             status['db_meta_refresh_count'] += 1
+                            refresh_item = {
+                                'time': datetime.now().strftime('%H:%M:%S'),
+                                'type': 'DEAD',
+                                'type_kor': '죽은 자막 정리',
+                                'title': m_title,
+                                'target_id': m_id,
+                                'section_type': 'movie',
+                                'status': 'success',
+                                'detail': "삭제된 자막 정리 ➔ 영화 메타 새로고침 완료"
+                            }
+                            status['db_refreshed_items'].append(refresh_item)
                             notify({
                                 'status': status,
                                 'mode': 'db',
@@ -436,6 +449,17 @@ class Task(object):
                             time.sleep(0.1)
                         except Exception as e:
                             logger.error(f"[DB기준] 영화 메타 새로고침 실패: {m_title} - {str(e)}")
+                            refresh_item = {
+                                'time': datetime.now().strftime('%H:%M:%S'),
+                                'type': 'DEAD',
+                                'type_kor': '죽은 자막 정리',
+                                'title': m_title,
+                                'target_id': m_id,
+                                'section_type': 'movie',
+                                'status': 'fail',
+                                'detail': f"메타 새로고침 실패: {str(e)}"
+                            }
+                            status['db_refreshed_items'].append(refresh_item)
 
                     for s_id, s_title in refresh_show_ids.items():
                         if P.ModelSetting.get_bool('subtitle_task_stop_flag'):
@@ -446,6 +470,17 @@ class Task(object):
                             logger.warning(f"[DB기준] TV쇼 메타 새로고침: {s_title} (ID: {s_id})")
                             PlexWebHandle.refresh_by_id(s_id)
                             status['db_meta_refresh_count'] += 1
+                            refresh_item = {
+                                'time': datetime.now().strftime('%H:%M:%S'),
+                                'type': 'DEAD',
+                                'type_kor': '죽은 자막 정리',
+                                'title': s_title,
+                                'target_id': s_id,
+                                'section_type': 'show',
+                                'status': 'success',
+                                'detail': "삭제된 자막 정리 ➔ TV쇼 메타 새로고침 완료"
+                            }
+                            status['db_refreshed_items'].append(refresh_item)
                             notify({
                                 'status': status,
                                 'mode': 'db',
@@ -458,6 +493,17 @@ class Task(object):
                             time.sleep(0.1)
                         except Exception as e:
                             logger.error(f"[DB기준] TV쇼 메타 새로고침 실패: {s_title} - {str(e)}")
+                            refresh_item = {
+                                'time': datetime.now().strftime('%H:%M:%S'),
+                                'type': 'DEAD',
+                                'type_kor': '죽은 자막 정리',
+                                'title': s_title,
+                                'target_id': s_id,
+                                'section_type': 'show',
+                                'status': 'fail',
+                                'detail': f"메타 새로고침 실패: {str(e)}"
+                            }
+                            status['db_refreshed_items'].append(refresh_item)
 
             # -----------------------------------------------------------------
             # 3단계: 외화 한글 자막 누락 진단 및 자체자막(하드서브) 회피
@@ -632,9 +678,13 @@ class Task(object):
                                     # 디스크에 자막 파일이 존재함 -> 메타 새로고침 지시하여 Plex DB에 등록 유도!
                                     status['db_found_disk_sub_count'] += 1
                                     is_new_refresh = False
+                                    target_name = show_title if (m_row['metadata_type'] == 4 and show_title) else m_row['title']
+
                                     if refresh_target_id not in refreshed_disk_target_ids:
                                         refreshed_disk_target_ids.add(refresh_target_id)
                                         is_new_refresh = True
+                                        ref_status = 'success'
+                                        ref_detail = f"자막 파일({os.path.basename(found_disk_sub)}) 감지 ➔ 메타 새로고침 지시 완료"
                                         try:
                                             logger.warning(f"[DB기준] 디스크 자막 발견으로 메타 새로고침: {full_title} (ID: {refresh_target_id}, 자막: {found_disk_sub})")
                                             PlexWebHandle.refresh_by_id(refresh_target_id)
@@ -642,6 +692,29 @@ class Task(object):
                                             time.sleep(0.1)
                                         except Exception as e:
                                             logger.error(f"[DB기준] 메타 새로고침 실패: {str(e)}")
+                                            ref_status = 'fail'
+                                            ref_detail = f"메타 새로고침 실패: {str(e)}"
+
+                                        refresh_item = {
+                                            'time': datetime.now().strftime('%H:%M:%S'),
+                                            'type': 'FOUND_DISK',
+                                            'type_kor': '디스크 자막 감지',
+                                            'title': target_name,
+                                            'target_id': refresh_target_id,
+                                            'section_type': section_type,
+                                            'found_sub': os.path.basename(found_disk_sub),
+                                            'sub_count': 1,
+                                            'status': ref_status,
+                                            'detail': ref_detail
+                                        }
+                                        status['db_refreshed_items'].append(refresh_item)
+                                    else:
+                                        for r_item in status['db_refreshed_items']:
+                                            if r_item.get('target_id') == refresh_target_id:
+                                                r_item['sub_count'] = r_item.get('sub_count', 1) + 1
+                                                if r_item.get('status') == 'success':
+                                                    r_item['detail'] = f"자막 파일({r_item.get('found_sub')} 외 {r_item['sub_count']-1}편) 감지 ➔ {('TV쇼' if section_type == 'show' else '영화')} 메타 새로고침 완료"
+                                                break
 
                                     found_log = {
                                         'status': status,
