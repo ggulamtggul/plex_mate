@@ -44,6 +44,21 @@
   </div>
 </div>
 
+<div id="refresh_card_div" style="display: none; margin-top: 10px; margin-bottom: 15px;">
+  <div class="card border-info" style="border-width: 1px; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+    <div class="card-header bg-light d-flex justify-content-between align-items-center" style="padding: 7px 12px; font-weight: bold; border-bottom: 1px solid #dee2e6;">
+      <span style="color: #17a2b8; font-size: 0.95rem;">
+        <i class="fa fa-refresh mr-1"></i> 메타 새로고침 진행 / 완료 목록 (<span id="refresh_count_badge" class="badge badge-info" style="font-size: 0.9em;">0</span>)
+      </span>
+      <span style="font-size: 0.8rem; color: #6c757d; font-weight: normal;">
+        * 실시간 로그가 200개를 초과해 지나가더라도, 새로고침된 항목은 상단에 계속 유지됩니다.
+      </span>
+    </div>
+    <div class="card-body" style="padding: 6px 12px; max-height: 220px; overflow-y: auto; background-color: #fafbfc;">
+      <div id="refresh_list_content"></div>
+    </div>
+  </div>
+</div>
 
 {{ macros.m_hr_head_top() }}
 {{ macros.m_row_start('0') }}
@@ -66,21 +81,25 @@ $(document).ready(function(){
 
 $("body").on('click', '#start0_btn', function(e){
   e.preventDefault();
+  render_refreshed_items([]);
   globalSendCommand('start0', $('#library_select').val(), $('#section_location').val());
 });
 
 $("body").on('click', '#start2_btn', function(e){
   e.preventDefault();
+  render_refreshed_items([]);
   globalSendCommand('start2', $('#library_select').val(), $('#section_location').val());
 });
 
 $("body").on('click', '#start3_btn', function(e){
   e.preventDefault();
+  render_refreshed_items([]);
   globalSendCommand('start3', $('#library_select').val(), $('#section_location').val());
 });
 
 $("body").on('click', '#start1_btn', function(e){
   e.preventDefault();
+  render_refreshed_items([]);
   globalSendCommand('start1', $('#library_select').val(), $('#section_location').val());
 });
 
@@ -230,7 +249,11 @@ function make_status(data) {
         }
       }
     }
+    if (data.db_refreshed_items) {
+      render_refreshed_items(data.db_refreshed_items);
+    }
   } else if (data.subtitle_count != null) {
+    render_refreshed_items([]);
     str += j_info_text2("자막파일 수", data.subtitle_count);
     str += j_info_text2("DB에 자막 정보 있음", data.subtitle_exist_in_meta_count);
     str += j_info_text2("DB에 자막 정보 없음", data.not_subtitle_exist_in_meta_count);
@@ -244,6 +267,60 @@ function make_status(data) {
   }
   str += j_row_end();
   $('#status_div').html(str);
+}
+
+
+function render_refreshed_items(items) {
+  if (!items || items.length === 0) {
+    $('#refresh_card_div').hide();
+    $('#refresh_list_content').html('');
+    $('#refresh_count_badge').text('0');
+    return;
+  }
+
+  $('#refresh_count_badge').text(items.length);
+  $('#refresh_card_div').show();
+
+  var html = '';
+  // 최신 새로고침된 항목이 위로 오도록 역순(reverse) 표시
+  var rev_items = items.slice().reverse();
+  for (var i = 0; i < rev_items.length; i++) {
+    var it = rev_items[i];
+    var type_badge = '';
+    if (it.type == 'DEAD') {
+      type_badge = '<span class="badge badge-danger" style="margin-right: 5px;">죽은 자막 정리</span>';
+    } else {
+      type_badge = '<span class="badge text-white" style="background-color: #17a2b8; margin-right: 5px;">디스크 자막 감지</span>';
+    }
+
+    var status_badge = '';
+    if (it.status == 'success') {
+      status_badge = '<span class="badge badge-success" style="margin-left: 6px;"><i class="fa fa-check"></i> 요청 성공</span>';
+    } else if (it.status == 'fail') {
+      status_badge = '<span class="badge badge-danger" style="margin-left: 6px;"><i class="fa fa-times"></i> 실패</span>';
+    }
+
+    var section_badge = (it.section_type == 'movie')
+      ? '<span class="badge badge-primary" style="margin-right: 5px;">영화</span>' 
+      : '<span class="badge badge-secondary" style="margin-right: 5px;">TV쇼</span>';
+
+    html += '<div style="padding: 6px 4px; border-bottom: 1px dashed #e2e2e2; display: flex; justify-content: space-between; align-items: center; font-size: 0.92rem;">';
+    html += '  <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%;">';
+    html += '    <span class="badge badge-dark" style="margin-right: 5px; font-weight: normal; font-family: monospace;">' + (it.time || '') + '</span>';
+    html +=      type_badge;
+    html +=      section_badge;
+    html += '    <strong style="color: #0b5ed7; margin-right: 8px;">' + it.title + '</strong>';
+    html += '    <span style="color: #495057; font-size: 0.88rem;">' + (it.detail || '') + '</span>';
+    html += '  </div>';
+    html += '  <div style="white-space: nowrap; text-align: right;">';
+    html +=      status_badge;
+    if (it.target_id) {
+      html += '    <span class="badge badge-light text-muted" style="border: 1px solid #ced4da; margin-left: 4px; font-family: monospace;">ID: ' + it.target_id + '</span>';
+    }
+    html += '  </div>';
+    html += '</div>';
+  }
+  $('#refresh_list_content').html(html);
 }
 
 
