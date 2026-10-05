@@ -1,6 +1,7 @@
 import fnmatch
 import os
 import re
+import shutil
 import sqlite3
 import time
 import traceback
@@ -207,6 +208,7 @@ class Task(object):
             'db_checked_sub_count': 0,
             'db_normal_sub_count': 0,
             'db_dead_sub_count': 0,
+            'db_smi2srt_count': 0,
             'db_meta_refresh_count': 0,
             'db_refreshed_items': [],
             'db_total_media_count': 0,
@@ -339,7 +341,9 @@ class Task(object):
                 notify({'status': status, 'mode': 'db', 'ret': {}})
 
                 refresh_movie_ids = {} # {metadata_item_id: title}
+                refresh_movie_reasons = {} # {metadata_item_id: set()}
                 refresh_show_ids = {}  # {show_id: show_title}
+                refresh_show_reasons = {}  # {show_id: set()}
 
                 def check_sub_exist(sub_row):
                     disk_path = None
@@ -384,17 +388,56 @@ class Task(object):
 
                             if exists:
                                 status['db_normal_sub_count'] += 1
+                                # smi to srt 옵션 활성화 시 정상 외부 자막에 대해서도 변환/리네임 수행
+                                if P.ModelSetting.get_bool('subtitle_use_smi_to_srt'):
+                                    conv_res = Task.process_smi_to_srt(disk_path)
+                                    if conv_res:
+                                        status['db_smi2srt_count'] += 1
+                                        act = conv_res['action'] # 'smi2srt' or 'rename_ko'
+                                        if sub_row['metadata_type'] == 1:
+                                            m_id = sub_row['metadata_item_id']
+                                            refresh_movie_ids[m_id] = sub_row['title']
+                                            if m_id not in refresh_movie_reasons:
+                                                refresh_movie_reasons[m_id] = set()
+                                            refresh_movie_reasons[m_id].add(act)
+                                        elif sub_row['metadata_type'] == 4:
+                                            show_id, show_title = get_show_info(sub_row['parent_id'])
+                                            if show_id:
+                                                refresh_show_ids[show_id] = show_title
+                                                if show_id not in refresh_show_reasons:
+                                                    refresh_show_reasons[show_id] = set()
+                                                refresh_show_reasons[show_id].add(act)
+
+                                        conv_log = {
+                                            'status': status,
+                                            'mode': 'db',
+                                            'ret': {'log_type': ('SMI2SRT' if act == 'smi2srt' else 'RENAME_KO')},
+                                            'title': sub_row['title'],
+                                            'video_file': sub_row['video_file'],
+                                            'old_path': conv_res['old_path'],
+                                            'new_path': conv_res['new_path'],
+                                            'stream_id': sub_row['stream_id'],
+                                            'section_type': section_type
+                                        }
+                                        notify(conv_log)
                             else:
                                 status['db_dead_sub_count'] += 1
                                 dead_stream_ids.add(sub_row['stream_id'])
 
                                 # 새로고침 타겟 등록
                                 if sub_row['metadata_type'] == 1:
-                                    refresh_movie_ids[sub_row['metadata_item_id']] = sub_row['title']
+                                    m_id = sub_row['metadata_item_id']
+                                    refresh_movie_ids[m_id] = sub_row['title']
+                                    if m_id not in refresh_movie_reasons:
+                                        refresh_movie_reasons[m_id] = set()
+                                    refresh_movie_reasons[m_id].add('dead')
                                 elif sub_row['metadata_type'] == 4:
                                     show_id, show_title = get_show_info(sub_row['parent_id'])
                                     if show_id:
                                         refresh_show_ids[show_id] = show_title
+                                        if show_id not in refresh_show_reasons:
+                                            refresh_show_reasons[show_id] = set()
+                                        refresh_show_reasons[show_id].add('dead')
 
                                 dead_log = {
                                     'status': status,
@@ -412,7 +455,7 @@ class Task(object):
                             if status['db_checked_sub_count'] % 10 == 0 or status['db_checked_sub_count'] == status['db_total_sub_count']:
                                 notify({'status': status, 'mode': 'db', 'ret': {}})
 
-                # 2단계: 죽은 자막 메타 새로고침 (쇼/영화 단위 중복 없이 일괄 호출)
+                # 2단계: 메타 새로고침 (쇼/영화 단위 중복 없이 일괄 호출)
                 if refresh_movie_ids or refresh_show_ids:
                     status['current_step'] = f"{'2단계: ' if mode == 'all' else ''}메타 새로고침 (영화 {len(refresh_movie_ids)}편, TV쇼 {len(refresh_show_ids)}개)"
                     notify({'status': status, 'mode': 'db', 'ret': {}})
@@ -426,15 +469,38 @@ class Task(object):
                             logger.warning(f"[DB기준] 영화 메타 새로고침: {m_title} (ID: {m_id})")
                             PlexWebHandle.refresh_by_id(m_id)
                             status['db_meta_refresh_count'] += 1
+
+                            m_reasons = refresh_movie_reasons.get(m_id, set(['dead']))
+                            if 'dead' in m_reasons and ('smi2srt' in m_reasons or 'rename_ko' in m_reasons):
+                                r_type = 'DEAD_AND_CONV'
+                                r_type_kor = '죽은 자막 및 변환'
+                                r_detail = "삭제된 자막 정리 및 변환 자막 ➔ 영화 메타 새로고침 완료"
+                            elif 'smi2srt' in m_reasons and 'rename_ko' in m_reasons:
+                                r_type = 'SMI2SRT'
+                                r_type_kor = 'SMI/한글 변환'
+                                r_detail = "SMI 변환 및 한글 자막 리네임 ➔ 영화 메타 새로고침 완료"
+                            elif 'smi2srt' in m_reasons:
+                                r_type = 'SMI2SRT'
+                                r_type_kor = 'SMI➔SRT 변환'
+                                r_detail = "SMI ➔ SRT 변환 ➔ 영화 메타 새로고침 완료"
+                            elif 'rename_ko' in m_reasons:
+                                r_type = 'RENAME_KO'
+                                r_type_kor = '한글 .ko.srt'
+                                r_detail = "한글 자막 .ko.srt 리네임 ➔ 영화 메타 새로고침 완료"
+                            else:
+                                r_type = 'DEAD'
+                                r_type_kor = '죽은 자막 정리'
+                                r_detail = "삭제된 자막 정리 ➔ 영화 메타 새로고침 완료"
+
                             refresh_item = {
                                 'time': datetime.now().strftime('%H:%M:%S'),
-                                'type': 'DEAD',
-                                'type_kor': '죽은 자막 정리',
+                                'type': r_type,
+                                'type_kor': r_type_kor,
                                 'title': m_title,
                                 'target_id': m_id,
                                 'section_type': 'movie',
                                 'status': 'success',
-                                'detail': "삭제된 자막 정리 ➔ 영화 메타 새로고침 완료"
+                                'detail': r_detail
                             }
                             status['db_refreshed_items'].append(refresh_item)
                             notify({
@@ -470,15 +536,38 @@ class Task(object):
                             logger.warning(f"[DB기준] TV쇼 메타 새로고침: {s_title} (ID: {s_id})")
                             PlexWebHandle.refresh_by_id(s_id)
                             status['db_meta_refresh_count'] += 1
+
+                            s_reasons = refresh_show_reasons.get(s_id, set(['dead']))
+                            if 'dead' in s_reasons and ('smi2srt' in s_reasons or 'rename_ko' in s_reasons):
+                                r_type = 'DEAD_AND_CONV'
+                                r_type_kor = '죽은 자막 및 변환'
+                                r_detail = "삭제된 자막 정리 및 변환 자막 ➔ TV쇼 메타 새로고침 완료"
+                            elif 'smi2srt' in s_reasons and 'rename_ko' in s_reasons:
+                                r_type = 'SMI2SRT'
+                                r_type_kor = 'SMI/한글 변환'
+                                r_detail = "SMI 변환 및 한글 자막 리네임 ➔ TV쇼 메타 새로고침 완료"
+                            elif 'smi2srt' in s_reasons:
+                                r_type = 'SMI2SRT'
+                                r_type_kor = 'SMI➔SRT 변환'
+                                r_detail = "SMI ➔ SRT 변환 ➔ TV쇼 메타 새로고침 완료"
+                            elif 'rename_ko' in s_reasons:
+                                r_type = 'RENAME_KO'
+                                r_type_kor = '한글 .ko.srt'
+                                r_detail = "한글 자막 .ko.srt 리네임 ➔ TV쇼 메타 새로고침 완료"
+                            else:
+                                r_type = 'DEAD'
+                                r_type_kor = '죽은 자막 정리'
+                                r_detail = "삭제된 자막 정리 ➔ TV쇼 메타 새로고침 완료"
+
                             refresh_item = {
                                 'time': datetime.now().strftime('%H:%M:%S'),
-                                'type': 'DEAD',
-                                'type_kor': '죽은 자막 정리',
+                                'type': r_type,
+                                'type_kor': r_type_kor,
                                 'title': s_title,
                                 'target_id': s_id,
                                 'section_type': 'show',
                                 'status': 'success',
-                                'detail': "삭제된 자막 정리 ➔ TV쇼 메타 새로고침 완료"
+                                'detail': r_detail
                             }
                             status['db_refreshed_items'].append(refresh_item)
                             notify({
@@ -656,12 +745,31 @@ class Task(object):
                                 candidate_exts = ['.ko.srt', '.kor.srt', '.ko.smi', '.kor.smi', '.srt', '.smi', '.ko.ass', '.ass']
 
                                 found_disk_sub = None
+                                sub_action_type = None
+                                use_smi2srt = P.ModelSetting.get_bool('subtitle_use_smi_to_srt')
+
                                 for sub_ext in candidate_exts:
                                     check_path = os.path.join(dir_path, base_stem + sub_ext)
                                     try:
                                         if os.path.exists(check_path):
-                                            found_disk_sub = check_path
-                                            break
+                                            if use_smi2srt:
+                                                conv_res = Task.process_smi_to_srt(check_path)
+                                                if conv_res:
+                                                    status['db_smi2srt_count'] += 1
+                                                    found_disk_sub = conv_res['new_path']
+                                                    sub_action_type = conv_res['action'] # 'smi2srt' or 'rename_ko'
+                                                    break
+                                                else:
+                                                    # process_smi_to_srt 결과가 없는 경우:
+                                                    # 1) .srt 인데 한글이 포함되지 않은 경우 -> 한글 자막이 아니므로 continue
+                                                    if sub_ext == '.srt':
+                                                        continue
+                                                    # 2) .ko.srt, .kor.srt 등 이미 정상이거나 변환 대상이 아닌 자막 -> 인정
+                                                    found_disk_sub = check_path
+                                                    break
+                                            else:
+                                                found_disk_sub = check_path
+                                                break
                                     except Exception:
                                         pass
 
@@ -680,11 +788,23 @@ class Task(object):
                                     is_new_refresh = False
                                     target_name = show_title if (m_row['metadata_type'] == 4 and show_title) else m_row['title']
 
+                                    type_code = 'FOUND_DISK'
+                                    type_kor = '디스크 자막 감지'
+                                    action_prefix = "자막 파일"
+                                    if sub_action_type == 'smi2srt':
+                                        type_code = 'FOUND_SMI2SRT'
+                                        type_kor = 'SMI➔SRT 변환'
+                                        action_prefix = "SMI 변환 자막"
+                                    elif sub_action_type == 'rename_ko':
+                                        type_code = 'FOUND_RENAME_KO'
+                                        type_kor = '한글 .ko.srt'
+                                        action_prefix = "한글 리네임 자막"
+
                                     if refresh_target_id not in refreshed_disk_target_ids:
                                         refreshed_disk_target_ids.add(refresh_target_id)
                                         is_new_refresh = True
                                         ref_status = 'success'
-                                        ref_detail = f"자막 파일({os.path.basename(found_disk_sub)}) 감지 ➔ 메타 새로고침 지시 완료"
+                                        ref_detail = f"{action_prefix}({os.path.basename(found_disk_sub)}) 감지 ➔ 메타 새로고침 지시 완료"
                                         try:
                                             logger.warning(f"[DB기준] 디스크 자막 발견으로 메타 새로고침: {full_title} (ID: {refresh_target_id}, 자막: {found_disk_sub})")
                                             PlexWebHandle.refresh_by_id(refresh_target_id)
@@ -697,8 +817,8 @@ class Task(object):
 
                                         refresh_item = {
                                             'time': datetime.now().strftime('%H:%M:%S'),
-                                            'type': 'FOUND_DISK',
-                                            'type_kor': '디스크 자막 감지',
+                                            'type': type_code,
+                                            'type_kor': type_kor,
                                             'title': target_name,
                                             'target_id': refresh_target_id,
                                             'section_type': section_type,
@@ -713,18 +833,19 @@ class Task(object):
                                             if r_item.get('target_id') == refresh_target_id:
                                                 r_item['sub_count'] = r_item.get('sub_count', 1) + 1
                                                 if r_item.get('status') == 'success':
-                                                    r_item['detail'] = f"자막 파일({r_item.get('found_sub')} 외 {r_item['sub_count']-1}편) 감지 ➔ {('TV쇼' if section_type == 'show' else '영화')} 메타 새로고침 완료"
+                                                    r_item['detail'] = f"{action_prefix}({r_item.get('found_sub')} 외 {r_item['sub_count']-1}편) 감지 ➔ {('TV쇼' if section_type == 'show' else '영화')} 메타 새로고침 완료"
                                                 break
 
                                     found_log = {
                                         'status': status,
                                         'mode': 'db',
-                                        'ret': {'log_type': 'FOUND_DISK_SUB'},
+                                        'ret': {'log_type': ('FOUND_SMI2SRT' if sub_action_type == 'smi2srt' else ('FOUND_RENAME_KO' if sub_action_type == 'rename_ko' else 'FOUND_DISK_SUB'))},
                                         'title': full_title,
                                         'video_file': video_file,
                                         'found_sub_path': found_disk_sub,
+                                        'sub_action_type': sub_action_type,
                                         'section_type': section_type,
-                                        'msg': f"디스크 자막 발견됨 -> 메타 새로고침 지시 완료" if is_new_refresh else "디스크 자막 발견됨 (해당 쇼 메타 새로고침 이미 요청됨)"
+                                        'msg': f"{action_prefix} 발견됨 -> 메타 새로고침 지시 완료" if is_new_refresh else f"{action_prefix} 발견됨 (해당 쇼 메타 새로고침 이미 요청됨)"
                                     }
                                     notify(found_log)
                                 else:
@@ -818,6 +939,85 @@ class Task(object):
             logger.error(f'Exception:{str(e)}')
             logger.error(traceback.format_exc())
             logger.error('smi2srt 플러그인 설치 필요')
+
+
+    @staticmethod
+    def process_smi_to_srt(filepath):
+        """
+        subtitle_use_smi_to_srt 설정 활성화 시 DB 검사 도중 파일 변환/리네임 수행:
+        1. .smi 파일: subtitle_tool 플러그인으로 .ko.srt 변환 후 .smi 삭제
+        2. .srt 파일: .ko.srt / .kor.srt 가 아닐 때 파일 내 한글(가-힣) 포함 여부 검사 후 .ko.srt 로 리네임
+        """
+        if not filepath or not os.path.exists(filepath):
+            return None
+        
+        try:
+            ext = os.path.splitext(filepath)[1].lower()
+            basename = os.path.basename(filepath)
+            dirname = os.path.dirname(filepath)
+            base_stem, _ = os.path.splitext(basename)
+
+            # 1) .smi 파일 변환
+            if ext == '.smi':
+                try:
+                    PP = F.PluginManager.get_plugin_instance('subtitle_tool')
+                    if PP and hasattr(PP, 'SupportSmi2srt'):
+                        PP.SupportSmi2srt.start(
+                            filepath, 
+                            remake=False, 
+                            no_remove_smi=False, 
+                            no_append_ko=False, 
+                            no_change_ko_srt=False
+                        )
+                        # 변환 후 생성 가능한 SRT 파일 경로 후보군 확인
+                        candidates = [
+                            os.path.join(dirname, base_stem + '.ko.srt'),
+                            os.path.join(dirname, base_stem + '.srt')
+                        ]
+                        if base_stem.lower().endswith('.ko'):
+                            candidates.insert(0, os.path.join(dirname, base_stem[:-3] + '.ko.srt'))
+
+                        target_srt = None
+                        for cand in candidates:
+                            if os.path.exists(cand):
+                                target_srt = cand
+                                break
+
+                        if target_srt:
+                            logger.warning(f"[DB smi2srt] .smi 변환 완료: {basename} -> {os.path.basename(target_srt)}")
+                            return {'action': 'smi2srt', 'new_path': target_srt, 'old_path': filepath}
+                except Exception as e:
+                    logger.error(f"[DB smi2srt] 변환 에러 ({filepath}): {str(e)}")
+                return None
+
+            # 2) .srt 파일 중 .ko.srt, .kor.srt 가 아닌 경우: 한글 포함 여부 검사 후 .ko.srt 로 리네임
+            if ext == '.srt':
+                lower_name = basename.lower()
+                if lower_name.endswith('.ko.srt') or lower_name.endswith('.kor.srt'):
+                    return None
+                
+                target_ko_srt = os.path.join(dirname, base_stem + '.ko.srt')
+                if os.path.exists(target_ko_srt):
+                    return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
+
+                content = None
+                for enc in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'utf-16']:
+                    try:
+                        with open(filepath, 'r', encoding=enc) as f:
+                            content = f.read(65536)
+                            break
+                    except Exception:
+                        pass
+                
+                if content and re.search(r'[\uac00-\ud7a3]', content):
+                    shutil.move(filepath, target_ko_srt)
+                    logger.warning(f"[DB smi2srt] 한글 자막 감지되어 .ko.srt로 리네임: {basename} -> {os.path.basename(target_ko_srt)}")
+                    return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
+        except Exception as e:
+            logger.error(f"[DB smi2srt] process_smi_to_srt 예외 ({filepath}): {str(e)}")
+            logger.error(traceback.format_exc())
+
+        return None
 
 
 
