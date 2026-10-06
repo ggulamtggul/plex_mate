@@ -134,53 +134,74 @@ class PageToolSimple(PluginPageBase):
                     ret = {'ret':'success', 'msg':'정상적으로 처리되었습니다.'}
                 else:
                     ret = {'ret':'warning', 'msg':'실패'}
-            elif command == 'duplicate_list':
-                query = f"select metadata_items.id as meta_id, metadata_items.media_item_count,  media_items.id as media_id, media_parts.id as media_parts_id, media_parts.file from media_items, metadata_items, media_parts, (select media_parts.file as file, min(media_items.id) as media_id,  count(*) as cnt from media_items, metadata_items, media_parts where media_items.metadata_item_id = metadata_items.id and media_parts.media_item_id = media_items.id and metadata_items.media_item_count > 1 and media_parts.file != '' group by media_parts.file having cnt > 1) as ttt where media_items.metadata_item_id = metadata_items.id and media_parts.media_item_id = media_items.id and metadata_items.media_item_count > 1 and media_parts.file != '' and media_parts.file = ttt.file order by meta_id, media_id, media_parts_id;"
+            elif command in ['duplicate_list', 'duplicate_remove']:
+                query = """
+                SELECT 
+                    mi.id AS meta_id, 
+                    mi.media_item_count, 
+                    mei.id AS media_id, 
+                    mp.id AS media_parts_id, 
+                    mp.file 
+                FROM media_items AS mei
+                JOIN metadata_items AS mi ON mei.metadata_item_id = mi.id
+                JOIN media_parts AS mp ON mp.media_item_id = mei.id
+                JOIN (
+                    SELECT 
+                        mei2.metadata_item_id, 
+                        mp2.file, 
+                        COUNT(*) AS cnt 
+                    FROM media_items AS mei2
+                    JOIN media_parts AS mp2 ON mp2.media_item_id = mei2.id
+                    WHERE mp2.file != ''
+                    GROUP BY mei2.metadata_item_id, mp2.file 
+                    HAVING cnt > 1
+                ) AS ttt ON mei.metadata_item_id = ttt.metadata_item_id AND mp.file = ttt.file
+                ORDER BY meta_id, media_id, media_parts_id;
+                """
                 data = PlexDBHandle.select(query)
-                ret['modal'] = json.dumps(data, indent=4, ensure_ascii=False)
-                ret['title'] = '목록'
-            elif command == 'duplicate_remove':
-                query = f"select metadata_items.id as meta_id, metadata_items.media_item_count,  media_items.id as media_id, media_parts.id as media_parts_id, media_parts.file from media_items, metadata_items, media_parts, (select media_parts.file as file, min(media_items.id) as media_id,  count(*) as cnt from media_items, metadata_items, media_parts where media_items.metadata_item_id = metadata_items.id and media_parts.media_item_id = media_items.id and metadata_items.media_item_count > 1 and media_parts.file != '' group by media_parts.file having cnt > 1) as ttt where media_items.metadata_item_id = metadata_items.id and media_parts.media_item_id = media_items.id and metadata_items.media_item_count > 1 and media_parts.file != '' and media_parts.file = ttt.file order by meta_id, media_id, media_parts_id;"
-                data = PlexDBHandle.select(query)
-                prev = None
-                filelist = []
-                query = ''
-                def delete_medie(meta_id, media_id):
-                    tmp = f"DELETE FROM media_streams WHERE media_item_id = {media_id};\n"
-                    tmp += f"DELETE FROM media_parts WHERE media_item_id = {media_id};\n"
-                    tmp += f"DELETE FROM media_items WHERE id = {media_id};\n"
-                    tmp += f"UPDATE metadata_items SET media_item_count = (SELECT COUNT(*) FROM media_items WHERE metadata_item_id = {meta_id}) WHERE id = {meta_id};\n"
-                    return tmp
-                def delete_part(part_id):
-                    tmp = f"DELETE FROM media_streams WHERE media_part_id = {part_id};\n"
-                    tmp += f"DELETE FROM media_parts WHERE id = {part_id};\n"
-                    return tmp
-                for idx, current in enumerate(data):
-                    try:
-                        if prev is None:
-                            continue
-                        if current['meta_id'] != prev['meta_id'] and current['file'] in filelist:
-                            logger.warning(d(current))
-                            pass
-                        if current['meta_id'] == prev['meta_id'] and current['file'] == prev['file']:
-                            if current['media_id'] != prev['media_id']:
-                                query += delete_medie(current['meta_id'], current['media_id'])
-                            elif current['media_parts_id'] != prev['media_parts_id']:
-                                query += delete_part(current['media_parts_id'])
+                if command == 'duplicate_list':
+                    ret['modal'] = json.dumps(data, indent=4, ensure_ascii=False)
+                    ret['title'] = '목록'
+                elif command == 'duplicate_remove':
+                    prev = None
+                    filelist = []
+                    query = ''
+                    def delete_medie(meta_id, media_id):
+                        tmp = f"DELETE FROM media_streams WHERE media_item_id = {media_id} OR media_part_id IN (SELECT id FROM media_parts WHERE media_item_id = {media_id});\n"
+                        tmp += f"DELETE FROM media_parts WHERE media_item_id = {media_id};\n"
+                        tmp += f"DELETE FROM media_items WHERE id = {media_id};\n"
+                        tmp += f"UPDATE metadata_items SET media_item_count = (SELECT COUNT(*) FROM media_items WHERE metadata_item_id = {meta_id}) WHERE id = {meta_id};\n"
+                        return tmp
+                    def delete_part(part_id):
+                        tmp = f"DELETE FROM media_streams WHERE media_part_id = {part_id};\n"
+                        tmp += f"DELETE FROM media_parts WHERE id = {part_id};\n"
+                        return tmp
+                    for idx, current in enumerate(data):
+                        try:
+                            if prev is None:
+                                continue
+                            if current['meta_id'] != prev['meta_id'] and current['file'] in filelist:
+                                logger.warning(d(current))
+                                pass
+                            if current['meta_id'] == prev['meta_id'] and current['file'] == prev['file']:
+                                if current['media_id'] != prev['media_id']:
+                                    query += delete_medie(current['meta_id'], current['media_id'])
+                                elif current['media_parts_id'] != prev['media_parts_id']:
+                                    query += delete_part(current['media_parts_id'])
 
-                    finally:     
-                        if current['file'] not in filelist:
-                            filelist.append(current['file'])
-                        prev = current
-                if query != '':
-                    logger.warning(query)
-                    result = PlexDBHandle.execute_query(query)
-                    if result != False:
-                        ret = {'ret':'success', 'msg':'정상적으로 처리되었습니다.'}
+                        finally:     
+                            if current['file'] not in filelist:
+                                filelist.append(current['file'])
+                            prev = current
+                    if query != '':
+                        logger.warning(query)
+                        result = PlexDBHandle.execute_query(query)
+                        if result != False:
+                            ret = {'ret':'success', 'msg':'정상적으로 처리되었습니다.'}
+                        else:
+                            ret = {'ret':'warning', 'msg':'실패'}
                     else:
-                        ret = {'ret':'warning', 'msg':'실패'}
-                else:
-                    ret = {'ret':'success', 'msg':'처리할 내용이 없습니다.'}
+                        ret = {'ret':'success', 'msg':'처리할 내용이 없습니다.'}
             elif command == 'equal_file_equal_meta':
                 query = f"""
                     WITH EqualFilenames AS (
