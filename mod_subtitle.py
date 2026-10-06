@@ -16,6 +16,7 @@ class ModuleSubtitle(PluginModuleBase):
         self.db_default = {
             f'{self.name}_db_version' : '1',
             f'{self.name}_use_smi_to_srt' : 'False',
+            f'{self.name}_use_vfs_refresh' : 'False',
             f'{self.name}_task_stop_flag' : 'False',
         }
         self.data = {

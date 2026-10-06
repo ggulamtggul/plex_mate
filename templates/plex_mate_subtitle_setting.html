@@ -6,7 +6,8 @@
 {{ macros.m_hr() }}
 
 <form id='setting'>
-  {{ macros.setting_checkbox('subtitle_use_smi_to_srt', 'smi to srt', value=arg['subtitle_use_smi_to_srt'], desc=['설정 : smi파일 삭제. ko.srt로 변환. srt, smi 같이 있는 경우 변환 없이 smi만 삭제']) }}
+  {{ macros.setting_checkbox('subtitle_use_smi_to_srt', 'smi to srt', value=arg['subtitle_use_smi_to_srt'], desc=['설정 : smi 파일은 .ko.srt 변환 생성. 한글 포함 단순 .srt 파일은 .ko.srt 로 복사 생성']) }}
+  {{ macros.setting_checkbox('subtitle_use_vfs_refresh', 'Rclone VFS Refresh', value=arg['subtitle_use_vfs_refresh'], desc=['설정 : Plex 메타 새로고침 전 해당 자막 폴더에 대해 Rclone vfs/refresh를 먼저 호출 (스캔 설정의 VFS 경로 변경 규칙 사용)']) }}
 </form>
 
 <script type="text/javascript">

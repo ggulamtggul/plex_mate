@@ -9,6 +9,7 @@ import urllib.parse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
+from .extensions import vfs_refresh
 from .plex_bin_scanner import PlexBinaryScanner
 from .plex_db import PlexDBHandle, dict_factory
 from .plex_web import PlexWebHandle
@@ -109,6 +110,7 @@ class Task(object):
 
                             if data['need_smi2srt']:
                                 Task.smi2srt(data)
+                                Task.try_vfs_refresh(base)
                                 if section_type == 'movie':
                                     logger.warning(f"영화 smi2srt 메타 새로고침1 : {rows[0]['title']}")
                                     PlexWebHandle.refresh_by_id(rows[0]['metadata_items_id'])
@@ -135,6 +137,7 @@ class Task(object):
                             
                             if len(rows) == 0:
                                 # 비디오 파일이 없다면 스캔
+                                Task.try_vfs_refresh(base)
                                 status['videofile_exist_not_in_meta_count'] += 1
                                 data['ret']['meta_by_videofile'] = False
                                 if section_type == 'movie':
@@ -153,6 +156,7 @@ class Task(object):
                                 status['videofile_exist_in_meta_count'] += 1
                                 data['ret']['meta_by_videofile'] = True
                                 # 비디오 파일이 이미 있다면 메타새로고침
+                                Task.try_vfs_refresh(base)
                                 if section_type == 'movie':
                                     data['meta_videofile']['title'] = rows[0]['title']
                                     data['meta_videofile']['metadata_items_id'] = rows[0]['metadata_items_id']
@@ -344,8 +348,10 @@ class Task(object):
 
                 refresh_movie_ids = {} # {metadata_item_id: title}
                 refresh_movie_reasons = {} # {metadata_item_id: set()}
+                refresh_movie_dirs = {} # {metadata_item_id: set()}
                 refresh_show_ids = {}  # {show_id: show_title}
                 refresh_show_reasons = {}  # {show_id: set()}
+                refresh_show_dirs = {}  # {show_id: set()}
 
                 def check_sub_exist(sub_row):
                     disk_path = None
@@ -402,6 +408,8 @@ class Task(object):
                                             if m_id not in refresh_movie_reasons:
                                                 refresh_movie_reasons[m_id] = set()
                                             refresh_movie_reasons[m_id].add(act)
+                                            if disk_path:
+                                                refresh_movie_dirs.setdefault(m_id, set()).add(os.path.dirname(disk_path))
                                         elif sub_row['metadata_type'] == 4:
                                             show_id, show_title = get_show_info(sub_row['parent_id'])
                                             if show_id:
@@ -409,6 +417,8 @@ class Task(object):
                                                 if show_id not in refresh_show_reasons:
                                                     refresh_show_reasons[show_id] = set()
                                                 refresh_show_reasons[show_id].add(act)
+                                                if disk_path:
+                                                    refresh_show_dirs.setdefault(show_id, set()).add(os.path.dirname(disk_path))
 
                                         conv_log = {
                                             'status': status,
@@ -433,6 +443,8 @@ class Task(object):
                                     if m_id not in refresh_movie_reasons:
                                         refresh_movie_reasons[m_id] = set()
                                     refresh_movie_reasons[m_id].add('dead')
+                                    if disk_path:
+                                        refresh_movie_dirs.setdefault(m_id, set()).add(os.path.dirname(disk_path))
                                 elif sub_row['metadata_type'] == 4:
                                     show_id, show_title = get_show_info(sub_row['parent_id'])
                                     if show_id:
@@ -440,6 +452,8 @@ class Task(object):
                                         if show_id not in refresh_show_reasons:
                                             refresh_show_reasons[show_id] = set()
                                         refresh_show_reasons[show_id].add('dead')
+                                        if disk_path:
+                                            refresh_show_dirs.setdefault(show_id, set()).add(os.path.dirname(disk_path))
 
                                 dead_log = {
                                     'status': status,
@@ -468,6 +482,8 @@ class Task(object):
                             notify({'status': status, 'mode': 'db', 'ret': {}})
                             return 'stop'
                         try:
+                            for d_path in refresh_movie_dirs.get(m_id, []):
+                                Task.try_vfs_refresh(d_path)
                             logger.warning(f"[DB기준] 영화 메타 새로고침: {m_title} (ID: {m_id})")
                             PlexWebHandle.refresh_by_id(m_id)
                             status['db_meta_refresh_count'] += 1
@@ -535,6 +551,8 @@ class Task(object):
                             notify({'status': status, 'mode': 'db', 'ret': {}})
                             return 'stop'
                         try:
+                            for d_path in refresh_show_dirs.get(s_id, []):
+                                Task.try_vfs_refresh(d_path)
                             logger.warning(f"[DB기준] TV쇼 메타 새로고침: {s_title} (ID: {s_id})")
                             PlexWebHandle.refresh_by_id(s_id)
                             status['db_meta_refresh_count'] += 1
@@ -813,6 +831,7 @@ class Task(object):
                                         ref_status = 'success'
                                         ref_detail = f"{action_prefix}({os.path.basename(found_disk_sub)}) 감지 ➔ 메타 새로고침 지시 완료"
                                         try:
+                                            Task.try_vfs_refresh(found_disk_sub)
                                             logger.warning(f"[DB기준] 디스크 자막 발견으로 메타 새로고침: {full_title} (ID: {refresh_target_id}, 자막: {found_disk_sub})")
                                             PlexWebHandle.refresh_by_id(refresh_target_id)
                                             status['db_meta_refresh_count'] += 1
@@ -984,6 +1003,27 @@ class Task(object):
             if filepath.startswith(ro):
                 return True
         return False
+
+    @staticmethod
+    def try_vfs_refresh(target_path):
+        """
+        subtitle_use_vfs_refresh 설정 활성화 시, Plex 메타 새로고침 전
+        해당 자막/영상 디렉토리에 대해 Rclone vfs/refresh 호출
+        """
+        if not P.ModelSetting.get_bool('subtitle_use_vfs_refresh'):
+            return
+        if not target_path:
+            return
+        try:
+            if os.path.isfile(target_path) or os.path.splitext(target_path)[1]:
+                target_dir = os.path.dirname(target_path)
+            else:
+                target_dir = target_path
+            if target_dir:
+                logger.warning(f"[VFS] Rclone vfs/refresh 요청: {target_dir}")
+                vfs_refresh(target_dir)
+        except Exception as e:
+            logger.error(f"[VFS] vfs_refresh 실패: {str(e)}")
 
     @staticmethod
     def process_smi_to_srt(filepath):
