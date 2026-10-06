@@ -1011,10 +1011,11 @@ class Task(object):
                 try:
                     PP = F.PluginManager.get_plugin_instance('subtitle_tool')
                     if PP and hasattr(PP, 'SupportSmi2srt'):
+                        # merge 드라이브 원본 삭제 불가 대응: no_remove_smi=True 로 원본 유지하며 .ko.srt 만 생성
                         PP.SupportSmi2srt.start(
                             filepath, 
                             remake=False, 
-                            no_remove_smi=False, 
+                            no_remove_smi=True, 
                             no_append_ko=False, 
                             no_change_ko_srt=False
                         )
@@ -1044,7 +1045,7 @@ class Task(object):
                     logger.error(f"[DB smi2srt] 변환 에러 ({filepath}): {str(e)}")
                 return None
 
-            # 2) .srt 파일 중 언어 태그가 없는 경우: 한글 포함 여부 검사 후 .ko.srt 로 리네임
+            # 2) .srt 파일 중 언어 태그가 없는 경우: 한글 포함 여부 검사 후 .ko.srt 로 복사 생성
             if ext == '.srt':
                 lower_name = basename.lower()
                 # 이미 한국어 태그가 붙어있는 경우 (.ko.srt, _ko.srt, ,ko.srt, .kor.srt 등)
@@ -1070,20 +1071,19 @@ class Task(object):
                         pass
                 
                 if content and re.search(r'[\uac00-\ud7a3\u3131-\u3163]', content):
-                    # 머지/읽기전용 드라이브로 이미 확인된 경우 리네임 시도 없이 한글 자막으로 인정(유지)
+                    # 머지/읽기전용 드라이브로 이미 확인된 경우 복사 쓰기 시도 없이 한글 자막으로 인정(유지)
                     if is_readonly:
                         return {'action': 'keep_ko', 'new_path': filepath, 'old_path': filepath}
 
                     try:
-                        # shutil.move 대신 os.replace 사용하여 FUSE I/O fallback 지연 방지
-                        os.replace(filepath, target_ko_srt)
-                        logger.warning(f"[DB smi2srt] 한글 자막 감지되어 .ko.srt로 리네임: {basename} -> {os.path.basename(target_ko_srt)}")
+                        # 원본 삭제/이름변경 불가 머지 드라이브 대응: 원본은 그대로 두고 .ko.srt 로 복사 생성
+                        shutil.copyfile(filepath, target_ko_srt)
+                        logger.warning(f"[DB smi2srt] 한글 자막 감지되어 .ko.srt 복사 생성: {basename} -> {os.path.basename(target_ko_srt)}")
                         return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
                     except OSError as e:
-                        # [Errno 30] Read-only file system 또는 권한 없음 (머지 드라이브 원본 삭제/리네임 불가)
+                        # 복사 쓰기마저 불가능한 완전 읽기 전용 스토리지인 경우
                         if getattr(e, 'errno', None) in [30, 13] or 'Read-only' in str(e) or 'Permission' in str(e):
                             Task.mark_readonly_root(filepath)
-                            # 리네임은 실패했지만 한글 자막임은 확인되었으므로 한글 자막 유지 처리
                             return {'action': 'keep_ko', 'new_path': filepath, 'old_path': filepath}
                         raise
         except Exception as e:
