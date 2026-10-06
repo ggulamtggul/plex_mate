@@ -197,6 +197,7 @@ class Task(object):
 
     @staticmethod
     def start_db(self, section_id, section_location, mode='all'):
+        Task.readonly_paths = set()
         con = None
         status = {
             'is_working': 'run',
@@ -941,16 +942,23 @@ class Task(object):
             logger.error('smi2srt 플러그인 설치 필요')
 
 
+    readonly_paths = set()
+
     @staticmethod
     def process_smi_to_srt(filepath):
         """
         subtitle_use_smi_to_srt 설정 활성화 시 DB 검사 도중 파일 변환/리네임 수행:
         1. .smi 파일: subtitle_tool 플러그인으로 .ko.srt 변환 후 .smi 삭제
-        2. .srt 파일: .ko.srt / .kor.srt 가 아닐 때 파일 내 한글(가-힣) 포함 여부 검사 후 .ko.srt 로 리네임
+        2. .srt 파일: 언어 태그 없는 .srt 중 한글 포함 시 .ko.srt 로 리네임
         """
         if not filepath or not os.path.exists(filepath):
             return None
         
+        # 이미 읽기 전용 파일시스템으로 감지된 경로면 쓰기 시도 즉시 스킵
+        for ro_path in Task.readonly_paths:
+            if filepath.startswith(ro_path):
+                return None
+
         try:
             ext = os.path.splitext(filepath)[1].lower()
             basename = os.path.basename(filepath)
@@ -986,14 +994,25 @@ class Task(object):
                         if target_srt:
                             logger.warning(f"[DB smi2srt] .smi 변환 완료: {basename} -> {os.path.basename(target_srt)}")
                             return {'action': 'smi2srt', 'new_path': target_srt, 'old_path': filepath}
+                except OSError as e:
+                    if getattr(e, 'errno', None) in [30, 13] or 'Read-only' in str(e) or 'Permission' in str(e):
+                        logger.warning(f"[DB smi2srt] 읽기 전용 파일시스템 감지 ({dirname}): 쓰기 작업을 건너뜁니다.")
+                        Task.readonly_paths.add(dirname)
+                        return None
+                    logger.error(f"[DB smi2srt] 변환 에러 ({filepath}): {str(e)}")
                 except Exception as e:
                     logger.error(f"[DB smi2srt] 변환 에러 ({filepath}): {str(e)}")
                 return None
 
-            # 2) .srt 파일 중 .ko.srt, .kor.srt 가 아닌 경우: 한글 포함 여부 검사 후 .ko.srt 로 리네임
+            # 2) .srt 파일 중 언어 태그가 없는 경우: 한글 포함 여부 검사 후 .ko.srt 로 리네임
             if ext == '.srt':
                 lower_name = basename.lower()
-                if lower_name.endswith('.ko.srt') or lower_name.endswith('.kor.srt'):
+                # 이미 한국어 태그가 붙어있는 경우 (.ko.srt, _ko.srt, ,ko.srt, .kor.srt 등)
+                if re.search(r'[\._\-, ](ko|kor)\.srt$', lower_name):
+                    return None
+                
+                # 이미 타 언어 태그가 명시된 경우 (.eng.srt, .en.srt, .ja.srt, .chi.srt 등)
+                if re.search(r'[\._\-, ](eng|en|ja|jpn|chi|zh|spa|fre|fra|ger|deu)\.srt$', lower_name):
                     return None
                 
                 target_ko_srt = os.path.join(dirname, base_stem + '.ko.srt')
@@ -1011,12 +1030,20 @@ class Task(object):
                         pass
                 
                 if content and re.search(r'[\uac00-\ud7a3\u3131-\u3163]', content):
-                    shutil.move(filepath, target_ko_srt)
-                    logger.warning(f"[DB smi2srt] 한글 자막 감지되어 .ko.srt로 리네임: {basename} -> {os.path.basename(target_ko_srt)}")
-                    return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
+                    try:
+                        # shutil.move 대신 os.replace 사용하여 FUSE I/O fallback 지연 방지
+                        os.replace(filepath, target_ko_srt)
+                        logger.warning(f"[DB smi2srt] 한글 자막 감지되어 .ko.srt로 리네임: {basename} -> {os.path.basename(target_ko_srt)}")
+                        return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
+                    except OSError as e:
+                        # [Errno 30] Read-only file system 또는 권한 없음
+                        if getattr(e, 'errno', None) in [30, 13] or 'Read-only' in str(e) or 'Permission' in str(e):
+                            logger.warning(f"[DB smi2srt] 읽기 전용 파일시스템 감지 ({dirname}): 이후 동일 경로 리네임을 건너뜁니다.")
+                            Task.readonly_paths.add(dirname)
+                            return None
+                        raise
         except Exception as e:
             logger.error(f"[DB smi2srt] process_smi_to_srt 예외 ({filepath}): {str(e)}")
-            logger.error(traceback.format_exc())
 
         return None
 
