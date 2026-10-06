@@ -252,6 +252,7 @@ class Task(object):
             status['section_type'] = section_type
 
             locations = PlexDBHandle.section_location(library_id=section_id)
+            Task.section_locations = [tmp.get('root_path', '') for tmp in locations if tmp.get('root_path')]
             selected_location = None
             if section_location != 'all':
                 for tmp in locations:
@@ -392,7 +393,7 @@ class Task(object):
                                 # smi to srt 옵션 활성화 시 정상 외부 자막에 대해서도 변환/리네임 수행
                                 if P.ModelSetting.get_bool('subtitle_use_smi_to_srt'):
                                     conv_res = Task.process_smi_to_srt(disk_path)
-                                    if conv_res:
+                                    if conv_res and conv_res.get('action') in ['smi2srt', 'rename_ko']:
                                         status['db_smi2srt_count'] += 1
                                         act = conv_res['action'] # 'smi2srt' or 'rename_ko'
                                         if sub_row['metadata_type'] == 1:
@@ -756,9 +757,10 @@ class Task(object):
                                             if use_smi2srt:
                                                 conv_res = Task.process_smi_to_srt(check_path)
                                                 if conv_res:
-                                                    status['db_smi2srt_count'] += 1
+                                                    if conv_res['action'] in ['smi2srt', 'rename_ko']:
+                                                        status['db_smi2srt_count'] += 1
                                                     found_disk_sub = conv_res['new_path']
-                                                    sub_action_type = conv_res['action'] # 'smi2srt' or 'rename_ko'
+                                                    sub_action_type = conv_res['action'] # 'smi2srt', 'rename_ko', or 'keep_ko'
                                                     break
                                                 else:
                                                     # process_smi_to_srt 결과가 없는 경우:
@@ -800,6 +802,10 @@ class Task(object):
                                         type_code = 'FOUND_RENAME_KO'
                                         type_kor = '한글 .ko.srt'
                                         action_prefix = "한글 리네임 자막"
+                                    elif sub_action_type == 'keep_ko':
+                                        type_code = 'FOUND_DISK'
+                                        type_kor = '디스크 한글자막 감지'
+                                        action_prefix = "디스크 한글자막"
 
                                     if refresh_target_id not in refreshed_disk_target_ids:
                                         refreshed_disk_target_ids.add(refresh_target_id)
@@ -943,6 +949,41 @@ class Task(object):
 
 
     readonly_paths = set()
+    section_locations = []
+
+    @staticmethod
+    def mark_readonly_root(filepath):
+        # 1. 라이브러리 루트와 매칭
+        for loc in getattr(Task, 'section_locations', []):
+            if filepath.startswith(loc):
+                if loc not in Task.readonly_paths:
+                    Task.readonly_paths.add(loc)
+                    logger.warning(f"[DB smi2srt] 읽기전용/머지 드라이브 감지: 라이브러리 경로 전체({loc}) 쓰기 작업을 건너뜁니다.")
+                return loc
+
+        # 2. 마운트 포인트 탐색
+        p = os.path.abspath(filepath)
+        while p and p != os.path.dirname(p):
+            try:
+                if os.path.ismount(p):
+                    if p not in Task.readonly_paths:
+                        Task.readonly_paths.add(p)
+                        logger.warning(f"[DB smi2srt] 읽기전용/머지 드라이브 감지: 마운트 경로 전체({p}) 쓰기 작업을 건너뜁니다.")
+                    return p
+            except Exception:
+                pass
+            p = os.path.dirname(p)
+
+        d = os.path.dirname(filepath)
+        Task.readonly_paths.add(d)
+        return d
+
+    @staticmethod
+    def is_readonly_path(filepath):
+        for ro in getattr(Task, 'readonly_paths', set()):
+            if filepath.startswith(ro):
+                return True
+        return False
 
     @staticmethod
     def process_smi_to_srt(filepath):
@@ -950,14 +991,12 @@ class Task(object):
         subtitle_use_smi_to_srt 설정 활성화 시 DB 검사 도중 파일 변환/리네임 수행:
         1. .smi 파일: subtitle_tool 플러그인으로 .ko.srt 변환 후 .smi 삭제
         2. .srt 파일: 언어 태그 없는 .srt 중 한글 포함 시 .ko.srt 로 리네임
+           (단, 머지/읽기전용 드라이브라 리네임이 불가능할 경우 한글 자막으로만 인정하고 유지: keep_ko)
         """
         if not filepath or not os.path.exists(filepath):
             return None
-        
-        # 이미 읽기 전용 파일시스템으로 감지된 경로면 쓰기 시도 즉시 스킵
-        for ro_path in Task.readonly_paths:
-            if filepath.startswith(ro_path):
-                return None
+
+        is_readonly = Task.is_readonly_path(filepath)
 
         try:
             ext = os.path.splitext(filepath)[1].lower()
@@ -967,6 +1006,8 @@ class Task(object):
 
             # 1) .smi 파일 변환
             if ext == '.smi':
+                if is_readonly:
+                    return None
                 try:
                     PP = F.PluginManager.get_plugin_instance('subtitle_tool')
                     if PP and hasattr(PP, 'SupportSmi2srt'):
@@ -996,8 +1037,7 @@ class Task(object):
                             return {'action': 'smi2srt', 'new_path': target_srt, 'old_path': filepath}
                 except OSError as e:
                     if getattr(e, 'errno', None) in [30, 13] or 'Read-only' in str(e) or 'Permission' in str(e):
-                        logger.warning(f"[DB smi2srt] 읽기 전용 파일시스템 감지 ({dirname}): 쓰기 작업을 건너뜁니다.")
-                        Task.readonly_paths.add(dirname)
+                        Task.mark_readonly_root(filepath)
                         return None
                     logger.error(f"[DB smi2srt] 변환 에러 ({filepath}): {str(e)}")
                 except Exception as e:
@@ -1030,17 +1070,21 @@ class Task(object):
                         pass
                 
                 if content and re.search(r'[\uac00-\ud7a3\u3131-\u3163]', content):
+                    # 머지/읽기전용 드라이브로 이미 확인된 경우 리네임 시도 없이 한글 자막으로 인정(유지)
+                    if is_readonly:
+                        return {'action': 'keep_ko', 'new_path': filepath, 'old_path': filepath}
+
                     try:
                         # shutil.move 대신 os.replace 사용하여 FUSE I/O fallback 지연 방지
                         os.replace(filepath, target_ko_srt)
                         logger.warning(f"[DB smi2srt] 한글 자막 감지되어 .ko.srt로 리네임: {basename} -> {os.path.basename(target_ko_srt)}")
                         return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
                     except OSError as e:
-                        # [Errno 30] Read-only file system 또는 권한 없음
+                        # [Errno 30] Read-only file system 또는 권한 없음 (머지 드라이브 원본 삭제/리네임 불가)
                         if getattr(e, 'errno', None) in [30, 13] or 'Read-only' in str(e) or 'Permission' in str(e):
-                            logger.warning(f"[DB smi2srt] 읽기 전용 파일시스템 감지 ({dirname}): 이후 동일 경로 리네임을 건너뜁니다.")
-                            Task.readonly_paths.add(dirname)
-                            return None
+                            Task.mark_readonly_root(filepath)
+                            # 리네임은 실패했지만 한글 자막임은 확인되었으므로 한글 자막 유지 처리
+                            return {'action': 'keep_ko', 'new_path': filepath, 'old_path': filepath}
                         raise
         except Exception as e:
             logger.error(f"[DB smi2srt] process_smi_to_srt 예외 ({filepath}): {str(e)}")
