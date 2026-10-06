@@ -64,6 +64,105 @@ class Task(object):
             P.get_module('base').task_interface2('retrieve_category', -1)
         return Task.get_size(args)
 
+    @staticmethod
+    @celery.task()
+    def get_agent_cache_size(args=None):
+        try:
+            base_data = P.ModelSetting.get('base_path_data')
+            if not base_data or not os.path.exists(base_data):
+                return {'ret': 'fail', 'log': 'Plex 데이터 경로가 설정되지 않았거나 존재하지 않습니다.'}
+            target_dirs = [
+                os.path.join(base_data, 'Plug-in Support', 'Caches'),
+                os.path.join(base_data, 'Plug-in Support', 'Data'),
+            ]
+            total_size = 0
+            file_count = 0
+            found_dirs = []
+            for parent in target_dirs:
+                if not os.path.exists(parent):
+                    continue
+                for item in os.listdir(parent):
+                    if 'sjva' in item.lower():
+                        tpath = os.path.join(parent, item)
+                        found_dirs.append(item)
+                        for root, _, files in os.walk(tpath):
+                            for f in files:
+                                fp = os.path.join(root, f)
+                                try:
+                                    total_size += os.path.getsize(fp)
+                                    file_count += 1
+                                except Exception:
+                                    pass
+            def format_size(s):
+                for u in ['B', 'KB', 'MB', 'GB', 'TB']:
+                    if s < 1024: return f"{s:.2f} {u}"
+                    s /= 1024
+                return f"{s:.2f} PB"
+            sizeh = format_size(total_size)
+            return {
+                'ret': 'success',
+                'size': total_size,
+                'sizeh': sizeh,
+                'count': file_count,
+                'target': ', '.join(found_dirs) if found_dirs else '캐시 폴더 없음',
+                'log': f"SjvaAgent 캐시: {file_count}개 파일 ({sizeh})"
+            }
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            return {'ret': 'fail', 'log': str(e)}
+
+    @staticmethod
+    @celery.task()
+    def clear_agent_cache(args=None):
+        try:
+            base_data = P.ModelSetting.get('base_path_data')
+            if not base_data or not os.path.exists(base_data):
+                return {'ret': 'fail', 'log': 'Plex 데이터 경로가 설정되지 않았거나 존재하지 않습니다.'}
+            target_dirs = [
+                os.path.join(base_data, 'Plug-in Support', 'Caches'),
+                os.path.join(base_data, 'Plug-in Support', 'Data'),
+            ]
+            deleted_size = 0
+            deleted_count = 0
+            found_dirs = []
+            for parent in target_dirs:
+                if not os.path.exists(parent):
+                    continue
+                for item in os.listdir(parent):
+                    if 'sjva' in item.lower():
+                        tpath = os.path.join(parent, item)
+                        found_dirs.append(item)
+                        for root, dirs, files in os.walk(tpath, topdown=False):
+                            for f in files:
+                                fp = os.path.join(root, f)
+                                try:
+                                    deleted_size += os.path.getsize(fp)
+                                    os.remove(fp)
+                                    deleted_count += 1
+                                except Exception:
+                                    pass
+                            for d in dirs:
+                                try:
+                                    os.rmdir(os.path.join(root, d))
+                                except Exception:
+                                    pass
+            def format_size(s):
+                for u in ['B', 'KB', 'MB', 'GB', 'TB']:
+                    if s < 1024: return f"{s:.2f} {u}"
+                    s /= 1024
+                return f"{s:.2f} PB"
+            sizeh = format_size(deleted_size)
+            return {
+                'ret': 'success',
+                'size': deleted_size,
+                'sizeh': sizeh,
+                'count': deleted_count,
+                'target': ', '.join(found_dirs) if found_dirs else '캐시 폴더 없음',
+                'log': f"SjvaAgent 캐시 비우기 완료: {deleted_count}개 파일 ({sizeh})"
+            }
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            return {'ret': 'fail', 'log': str(e)}
 
     @staticmethod
     @celery.task()

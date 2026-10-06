@@ -193,6 +193,10 @@ class ModuleBase(PluginModuleBase):
             func = Task.agent_update
         elif command == 'retrieve_category':
             func = Task.retrieve_category
+        elif command == 'agent_cache_size':
+            func = Task.get_agent_cache_size
+        elif command == 'clear_agent_cache':
+            func = Task.clear_agent_cache
         
         ret = self.start_celery(func, None, *args)
 
@@ -215,6 +219,26 @@ class ModuleBase(PluginModuleBase):
             noti_data = {'type':'info', 'msg' : f"경로 : {ret['target']}<br>크기 : {ret['sizeh']}"}
             F.socketio.emit("notify", noti_data, namespace='/framework')
         elif command == 'clear_ret':
+            return ret
+        elif command == 'agent_cache_size':
+            if ret.get('ret') == 'success':
+                modal_data = {
+                    'title' : 'SjvaAgent 캐시 크기',
+                    'data' : f"폴더 : {ret['target']}\n파일 수 : {ret['count']}개\n크기 : {ret['sizeh']}",
+                }
+            else:
+                modal_data = {
+                    'title' : 'SjvaAgent 캐시 확인 실패',
+                    'data' : ret.get('log', '확인 실패'),
+                }
+            F.socketio.emit("modal", modal_data, namespace='/framework')
+        elif command == 'clear_agent_cache':
+            if ret.get('ret') == 'success':
+                msg = f"SjvaAgent 캐시 비우기 완료<br>대상: {ret['target']}<br>파일 수: {ret['count']}개<br>삭제 크기: {ret['sizeh']}"
+                noti_data = {'type':'info', 'msg' : msg}
+            else:
+                noti_data = {'type':'danger', 'msg' : f"캐시 비우기 실패: {ret.get('log', '오류')}"}
+            F.socketio.emit("notify", noti_data, namespace='/framework')
             return ret
         elif command == 'agent_update':
             if args[0][1]:
