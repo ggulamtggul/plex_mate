@@ -32,18 +32,22 @@ class PageClearCache(PluginPageBase):
         try:
             if command == 'cache_size':
                 cmd = 'size'
+                args = (P.ModelSetting.get('base_path_phototranscoder'),)
             elif command == 'cache_clear':
                 cmd = 'clear'
-            else:
+                args = (P.ModelSetting.get('base_path_phototranscoder'),)
+            elif command in ['agent_cache_size', 'clear_agent_cache']:
                 cmd = command
-
-            if cmd == 'retrieve_category':
+                args = ()
+            elif command == 'retrieve_category':
+                cmd = 'retrieve_category'
                 try:
                     section_id = int(arg1)
                 except (ValueError, TypeError):
                     section_id = -1
                 args = section_id
             else:
+                cmd = command
                 args = (P.ModelSetting.get('base_path_phototranscoder'),)
 
             task_interface(cmd, args)
