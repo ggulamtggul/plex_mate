@@ -398,7 +398,12 @@ class Task(object):
                                 status['db_normal_sub_count'] += 1
                                 # smi to srt 옵션 활성화 시 정상 외부 자막에 대해서도 변환/리네임 수행
                                 if P.ModelSetting.get_bool('subtitle_use_smi_to_srt'):
-                                    conv_res = Task.process_smi_to_srt(disk_path)
+                                    stream_lang = (sub_row.get('stream_language') or '').lower()
+                                    # DB 상에 이미 명확히 외국어(eng, en, jpn 등)로 등록된 자막은 제외
+                                    if stream_lang and stream_lang not in ['ko', 'kor', 'korean']:
+                                        conv_res = None
+                                    else:
+                                        conv_res = Task.process_smi_to_srt(disk_path, video_file=sub_row.get('video_file'))
                                     if conv_res and conv_res.get('action') in ['smi2srt', 'rename_ko']:
                                         status['db_smi2srt_count'] += 1
                                         act = conv_res['action'] # 'smi2srt' or 'rename_ko'
@@ -773,7 +778,7 @@ class Task(object):
                                     try:
                                         if os.path.exists(check_path):
                                             if use_smi2srt:
-                                                conv_res = Task.process_smi_to_srt(check_path)
+                                                conv_res = Task.process_smi_to_srt(check_path, video_file=video_file)
                                                 if conv_res:
                                                     if conv_res['action'] in ['smi2srt', 'rename_ko']:
                                                         status['db_smi2srt_count'] += 1
@@ -1026,23 +1031,52 @@ class Task(object):
             logger.error(f"[VFS] vfs_refresh 실패: {str(e)}")
 
     @staticmethod
-    def process_smi_to_srt(filepath):
+    def process_smi_to_srt(filepath, video_file=None):
         """
-        subtitle_use_smi_to_srt 설정 활성화 시 DB 검사 도중 파일 변환/리네임 수행:
-        1. .smi 파일: subtitle_tool 플러그인으로 .ko.srt 변환 후 .smi 삭제
-        2. .srt 파일: 언어 태그 없는 .srt 중 한글 포함 시 .ko.srt 로 리네임
-           (단, 머지/읽기전용 드라이브라 리네임이 불가능할 경우 한글 자막으로만 인정하고 유지: keep_ko)
+        subtitle_use_smi_to_srt 설정 활성화 시 DB 검사 도중 파일 변환/복사 생성 수행:
+        1. .smi 파일: subtitle_tool 플러그인으로 .ko.srt 변환 (이미 .ko.srt 존재 시 스킵)
+        2. .srt 파일: 언어 태그 없는 순수 .srt 중 실제 한글(20자 이상) 포함 시 .ko.srt 로 복사 생성
+           - 이미 해당 .ko.srt 가 있거나 외국어 태그(eng, sdh 등)가 있는 경우 스킵
+           - 읽기전용 드라이브인 경우 복사 쓰기 없이 한글 자막으로 인정(유지): keep_ko
         """
         if not filepath or not os.path.exists(filepath):
             return None
 
         is_readonly = Task.is_readonly_path(filepath)
 
+        FOREIGN_LANG_CODES = {
+            'eng', 'en', 'ja', 'jpn', 'chi', 'zh', 'chs', 'cht', 'spa', 'es',
+            'fre', 'fra', 'fr', 'ger', 'de', 'deu', 'ita', 'it', 'rus', 'ru',
+            'por', 'pt', 'vie', 'vi', 'tha', 'th', 'ind', 'id', 'ara', 'ar',
+            'heb', 'he', 'pol', 'pl', 'tur', 'tr', 'dut', 'nl', 'dan', 'da',
+            'nor', 'no', 'swe', 'sv', 'fin', 'fi', 'cze', 'cs', 'hun', 'hu',
+            'gre', 'el', 'rum', 'ro', 'bul', 'bg', 'ukr', 'uk'
+        }
+
         try:
             ext = os.path.splitext(filepath)[1].lower()
             basename = os.path.basename(filepath)
             dirname = os.path.dirname(filepath)
             base_stem, _ = os.path.splitext(basename)
+
+            # 대상 .ko.srt 경로 계산
+            if base_stem.lower().endswith('.ko'):
+                target_ko_srt = filepath
+            else:
+                target_ko_srt = os.path.join(dirname, base_stem + '.ko.srt')
+
+            # 이미 해당 파일명의 .ko.srt 가 디스크에 존재하는 경우 -> 추가 작업 불필요
+            if os.path.exists(target_ko_srt) and os.path.abspath(filepath) != os.path.abspath(target_ko_srt):
+                return None
+
+            # 비디오 파일 경로가 제공된 경우, 비디오 기준 정식 .ko.srt 가 이미 존재하는지 확인
+            if video_file:
+                v_stem, _ = os.path.splitext(os.path.basename(video_file))
+                v_dir = os.path.dirname(video_file)
+                v_ko_srt = os.path.join(v_dir, v_stem + '.ko.srt')
+                if os.path.exists(v_ko_srt) and os.path.abspath(filepath) != os.path.abspath(v_ko_srt):
+                    # 비디오에 매칭되는 정식 .ko.srt 가 이미 있으므로 기타 보조 .srt 는 추가 복사하지 않음
+                    return None
 
             # 1) .smi 파일 변환
             if ext == '.smi':
@@ -1088,29 +1122,33 @@ class Task(object):
             # 2) .srt 파일 중 언어 태그가 없는 경우: 한글 포함 여부 검사 후 .ko.srt 로 복사 생성
             if ext == '.srt':
                 lower_name = basename.lower()
-                # 이미 한국어 태그가 붙어있는 경우 (.ko.srt, _ko.srt, ,ko.srt, .kor.srt 등)
-                if re.search(r'[\._\-, ](ko|kor)\.srt$', lower_name):
-                    return None
-                
-                # 이미 타 언어 태그가 명시된 경우 (.eng.srt, .en.srt, .ja.srt, .chi.srt 등)
-                if re.search(r'[\._\-, ](eng|en|ja|jpn|chi|zh|spa|fre|fra|ger|deu)\.srt$', lower_name):
-                    return None
-                
-                target_ko_srt = os.path.join(dirname, base_stem + '.ko.srt')
-                if os.path.exists(target_ko_srt):
-                    return {'action': 'rename_ko', 'new_path': target_ko_srt, 'old_path': filepath}
 
+                # 이미 한국어 태그가 붙어있는 경우 (.ko.srt, _ko.srt, ,ko.srt, .kor.srt 등)
+                if re.search(r'[\._\-, ](ko|kor|korean)(\.[\w\-]+)?\.srt$', lower_name):
+                    return None
+
+                # 파일명 토큰 분석: 외래어 언어 코드(eng, ja, chi 등)가 포함되어 있는지 확인
+                stem_tokens = set(re.split(r'[\._\-, ]+', base_stem.lower()))
+                if stem_tokens.intersection(FOREIGN_LANG_CODES):
+                    return None
+
+                # 정규식 패턴: 외국어 코드 및 sdh/forced/cc/hi 등 서브태그가 포함된 경우 (예: .eng.sdh.srt)
+                foreign_pattern = r'[\._\-, ](' + '|'.join(FOREIGN_LANG_CODES) + r')([\._\-, ][\w\-]+)*\.srt$'
+                if re.search(foreign_pattern, lower_name):
+                    return None
+
+                # 파일 본문에서 완성형 한글(\uac00-\ud7a3) 검사: 최소 20글자 이상이어야 유효한 한글 자막으로 인정
                 content = None
                 for enc in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'utf-16']:
                     try:
                         with open(filepath, 'r', encoding=enc, errors='ignore') as f:
                             content = f.read(65536)
-                            if content and re.search(r'[\uac00-\ud7a3\u3131-\u3163]', content):
+                            if content and len(re.findall(r'[\uac00-\ud7a3]', content)) >= 20:
                                 break
                     except Exception:
                         pass
-                
-                if content and re.search(r'[\uac00-\ud7a3\u3131-\u3163]', content):
+
+                if content and len(re.findall(r'[\uac00-\ud7a3]', content)) >= 20:
                     # 머지/읽기전용 드라이브로 이미 확인된 경우 복사 쓰기 시도 없이 한글 자막으로 인정(유지)
                     if is_readonly:
                         return {'action': 'keep_ko', 'new_path': filepath, 'old_path': filepath}
