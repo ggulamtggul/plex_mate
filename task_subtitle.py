@@ -487,33 +487,36 @@ class Task(object):
                             notify({'status': status, 'mode': 'db', 'ret': {}})
                             return 'stop'
                         try:
+                            vfs_done = False
                             for d_path in refresh_movie_dirs.get(m_id, []):
-                                Task.try_vfs_refresh(d_path)
+                                if Task.try_vfs_refresh(d_path):
+                                    vfs_done = True
                             logger.warning(f"[DB기준] 영화 메타 새로고침: {m_title} (ID: {m_id})")
                             PlexWebHandle.refresh_by_id(m_id)
                             status['db_meta_refresh_count'] += 1
 
+                            vfs_tag = " (VFS 갱신)" if vfs_done else ""
                             m_reasons = refresh_movie_reasons.get(m_id, set(['dead']))
                             if 'dead' in m_reasons and ('smi2srt' in m_reasons or 'rename_ko' in m_reasons):
                                 r_type = 'DEAD_AND_CONV'
                                 r_type_kor = '죽은 자막 및 변환'
-                                r_detail = "삭제된 자막 정리 및 변환 자막 ➔ 영화 메타 새로고침 완료"
+                                r_detail = f"삭제된 자막 정리 및 변환 자막{vfs_tag} ➔ 영화 메타 새로고침 완료"
                             elif 'smi2srt' in m_reasons and 'rename_ko' in m_reasons:
                                 r_type = 'SMI2SRT'
                                 r_type_kor = 'SMI/한글 변환'
-                                r_detail = "SMI 변환 및 한글 자막 리네임 ➔ 영화 메타 새로고침 완료"
+                                r_detail = f"SMI 변환 및 한글 자막 복사{vfs_tag} ➔ 영화 메타 새로고침 완료"
                             elif 'smi2srt' in m_reasons:
                                 r_type = 'SMI2SRT'
                                 r_type_kor = 'SMI➔SRT 변환'
-                                r_detail = "SMI ➔ SRT 변환 ➔ 영화 메타 새로고침 완료"
+                                r_detail = f"SMI ➔ SRT 변환{vfs_tag} ➔ 영화 메타 새로고침 완료"
                             elif 'rename_ko' in m_reasons:
                                 r_type = 'RENAME_KO'
                                 r_type_kor = '한글 .ko.srt'
-                                r_detail = "한글 자막 .ko.srt 리네임 ➔ 영화 메타 새로고침 완료"
+                                r_detail = f"한글 자막 .ko.srt 복사{vfs_tag} ➔ 영화 메타 새로고침 완료"
                             else:
                                 r_type = 'DEAD'
                                 r_type_kor = '죽은 자막 정리'
-                                r_detail = "삭제된 자막 정리 ➔ 영화 메타 새로고침 완료"
+                                r_detail = f"삭제된 자막 정리{vfs_tag} ➔ 영화 메타 새로고침 완료"
 
                             refresh_item = {
                                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -556,33 +559,36 @@ class Task(object):
                             notify({'status': status, 'mode': 'db', 'ret': {}})
                             return 'stop'
                         try:
+                            vfs_done = False
                             for d_path in refresh_show_dirs.get(s_id, []):
-                                Task.try_vfs_refresh(d_path)
+                                if Task.try_vfs_refresh(d_path):
+                                    vfs_done = True
                             logger.warning(f"[DB기준] TV쇼 메타 새로고침: {s_title} (ID: {s_id})")
                             PlexWebHandle.refresh_by_id(s_id)
                             status['db_meta_refresh_count'] += 1
 
+                            vfs_tag = " (VFS 갱신)" if vfs_done else ""
                             s_reasons = refresh_show_reasons.get(s_id, set(['dead']))
                             if 'dead' in s_reasons and ('smi2srt' in s_reasons or 'rename_ko' in s_reasons):
                                 r_type = 'DEAD_AND_CONV'
                                 r_type_kor = '죽은 자막 및 변환'
-                                r_detail = "삭제된 자막 정리 및 변환 자막 ➔ TV쇼 메타 새로고침 완료"
+                                r_detail = f"삭제된 자막 정리 및 변환 자막{vfs_tag} ➔ TV쇼 메타 새로고침 완료"
                             elif 'smi2srt' in s_reasons and 'rename_ko' in s_reasons:
                                 r_type = 'SMI2SRT'
                                 r_type_kor = 'SMI/한글 변환'
-                                r_detail = "SMI 변환 및 한글 자막 리네임 ➔ TV쇼 메타 새로고침 완료"
+                                r_detail = f"SMI 변환 및 한글 자막 복사{vfs_tag} ➔ TV쇼 메타 새로고침 완료"
                             elif 'smi2srt' in s_reasons:
                                 r_type = 'SMI2SRT'
                                 r_type_kor = 'SMI➔SRT 변환'
-                                r_detail = "SMI ➔ SRT 변환 ➔ TV쇼 메타 새로고침 완료"
+                                r_detail = f"SMI ➔ SRT 변환{vfs_tag} ➔ TV쇼 메타 새로고침 완료"
                             elif 'rename_ko' in s_reasons:
                                 r_type = 'RENAME_KO'
                                 r_type_kor = '한글 .ko.srt'
-                                r_detail = "한글 자막 .ko.srt 리네임 ➔ TV쇼 메타 새로고침 완료"
+                                r_detail = f"한글 자막 .ko.srt 복사{vfs_tag} ➔ TV쇼 메타 새로고침 완료"
                             else:
                                 r_type = 'DEAD'
                                 r_type_kor = '죽은 자막 정리'
-                                r_detail = "삭제된 자막 정리 ➔ TV쇼 메타 새로고침 완료"
+                                r_detail = f"삭제된 자막 정리{vfs_tag} ➔ TV쇼 메타 새로고침 완료"
 
                             refresh_item = {
                                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -834,9 +840,9 @@ class Task(object):
                                         refreshed_disk_target_ids.add(refresh_target_id)
                                         is_new_refresh = True
                                         ref_status = 'success'
-                                        ref_detail = f"{action_prefix}({os.path.basename(found_disk_sub)}) 감지 ➔ 메타 새로고침 지시 완료"
+                                        vfs_done = False
                                         try:
-                                            Task.try_vfs_refresh(found_disk_sub)
+                                            vfs_done = Task.try_vfs_refresh(found_disk_sub)
                                             logger.warning(f"[DB기준] 디스크 자막 발견으로 메타 새로고침: {full_title} (ID: {refresh_target_id}, 자막: {found_disk_sub})")
                                             PlexWebHandle.refresh_by_id(refresh_target_id)
                                             status['db_meta_refresh_count'] += 1
@@ -844,6 +850,11 @@ class Task(object):
                                         except Exception as e:
                                             logger.error(f"[DB기준] 메타 새로고침 실패: {str(e)}")
                                             ref_status = 'fail'
+
+                                        vfs_tag = " (VFS 갱신)" if vfs_done else ""
+                                        if ref_status == 'success':
+                                            ref_detail = f"{action_prefix}({os.path.basename(found_disk_sub)}) 감지{vfs_tag} ➔ 메타 새로고침 지시 완료"
+                                        else:
                                             ref_detail = f"메타 새로고침 실패: {str(e)}"
 
                                         refresh_item = {
@@ -855,6 +866,7 @@ class Task(object):
                                             'section_type': section_type,
                                             'found_sub': os.path.basename(found_disk_sub),
                                             'sub_count': 1,
+                                            'vfs_done': vfs_done,
                                             'status': ref_status,
                                             'detail': ref_detail
                                         }
@@ -864,7 +876,8 @@ class Task(object):
                                             if r_item.get('target_id') == refresh_target_id:
                                                 r_item['sub_count'] = r_item.get('sub_count', 1) + 1
                                                 if r_item.get('status') == 'success':
-                                                    r_item['detail'] = f"{action_prefix}({r_item.get('found_sub')} 외 {r_item['sub_count']-1}편) 감지 ➔ {('TV쇼' if section_type == 'show' else '영화')} 메타 새로고침 완료"
+                                                    vfs_tag = " (VFS 갱신)" if r_item.get('vfs_done') else ""
+                                                    r_item['detail'] = f"{action_prefix}({r_item.get('found_sub')} 포함 총 {r_item['sub_count']}편 변환){vfs_tag} ➔ {('TV쇼' if section_type == 'show' else '영화')} 메타 새로고침 완료"
                                                 break
 
                                     found_log = {
@@ -1016,9 +1029,9 @@ class Task(object):
         해당 자막/영상 디렉토리에 대해 Rclone vfs/refresh 호출
         """
         if not P.ModelSetting.get_bool('subtitle_use_vfs_refresh'):
-            return
+            return False
         if not target_path:
-            return
+            return False
         try:
             if os.path.isfile(target_path) or os.path.splitext(target_path)[1]:
                 target_dir = os.path.dirname(target_path)
@@ -1027,8 +1040,11 @@ class Task(object):
             if target_dir:
                 logger.warning(f"[VFS] Rclone vfs/refresh 요청: {target_dir}")
                 vfs_refresh(target_dir)
+                return True
         except Exception as e:
             logger.error(f"[VFS] vfs_refresh 실패: {str(e)}")
+            return False
+        return False
 
     @staticmethod
     def process_smi_to_srt(filepath, video_file=None):
