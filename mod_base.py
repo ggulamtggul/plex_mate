@@ -36,6 +36,7 @@ class ModuleBase(PluginModuleBase):
             f'{self.name}_bin_scanner_gid' : '0',
             f'{self.name}_machine' : '',
             f'{self.name}_agent_auto_update' : 'False',
+            f'{self.name}_agent_git_url' : 'https://github.com/ggulamtggul/SjvaAgent.bundle',
             f'{self.name}_auto_start' : 'False',
             f'{self.name}_interval' : '0 4 * * *',
             f'{self.name}_db_backup_max_count' : '7',
@@ -159,13 +160,21 @@ class ModuleBase(PluginModuleBase):
             token = arg2
             msg = f"SjvaAgent : {PlexWebHandle.get_sjva_agent_version(url=url, token=token)}<br>"
             regex = re.compile("VERSION\s=\s'(?P<version>.*?)'")
-            text = requests.get('https://raw.githubusercontent.com/soju6jan/SjvaAgent.bundle/main/Contents/Code/version.py').text
-            match = regex.search(text)
-            if match:
-                msg += u'<br>SjvaAgent (최신) : ' + match.group('version')
+            git_url = P.ModelSetting.get('base_agent_git_url') or 'https://github.com/ggulamtggul/SjvaAgent.bundle'
+            raw_version_url = git_url.rstrip('.git').rstrip('/').replace('github.com', 'raw.githubusercontent.com') + '/HEAD/Contents/Code/version.py'
+            try:
+                text = requests.get(raw_version_url, timeout=5).text
+                match = regex.search(text)
+                if match:
+                    msg += u'<br>SjvaAgent (최신) : ' + match.group('version')
+            except Exception as e:
+                msg += f'<br>최신 버전 확인 실패: {e}'
             return jsonify({'title':'Agent', 'modal':msg})
         elif command == 'agent_update':
             self.task_interface('agent_update', ('SjvaAgent',True))
+        elif command == 'clear_agent_cache':
+            self.task_interface('clear_agent_cache')
+            ret = {'ret':'success', 'msg':'SjvaAgent 캐시 비우기 명령을 전달하였습니다.'}
         return jsonify(ret)      
 
 

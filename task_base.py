@@ -205,12 +205,21 @@ class Task(object):
     @celery.task()
     def agent_update(args):
         ret = {'recent_version':None, 'local_version':None, 'need_update':False}
+        # 저장소 URL
+        git_url = P.ModelSetting.get('base_agent_git_url') or 'https://github.com/ggulamtggul/SjvaAgent.bundle'
+        git_clone_url = git_url if git_url.endswith('.git') else git_url + '.git'
+        raw_version_url = git_url.rstrip('.git').rstrip('/').replace('github.com', 'raw.githubusercontent.com') + '/HEAD/Contents/Code/version.py'
+
         # 버전
         regex = re.compile("VERSION\s=\s'(?P<version>.*?)'")
-        text = requests.get('https://raw.githubusercontent.com/soju6jan/SjvaAgent.bundle/main/Contents/Code/version.py').text
-        match = regex.search(text)
-        if match:
-            ret['recent_version'] = match.group('version')
+        try:
+            text = requests.get(raw_version_url, timeout=10).text
+            match = regex.search(text)
+            if match:
+                ret['recent_version'] = match.group('version')
+        except Exception as e:
+            P.logger.error(f"[agent_update] version fetch error: {e}")
+
         if ret['recent_version'] == None:
             return "접속실패"
         all_agent_path = os.path.join(P.ModelSetting.get('base_path_data'), 'Plug-ins')
@@ -235,12 +244,18 @@ class Task(object):
         git_path = os.path.join(sjva_agent_path, '.git')
         if os.path.exists(sjva_agent_path):
             if os.path.exists(git_path):
-                command = ['git', '-C', sjva_agent_path, 'reset', '--hard', 'HEAD']
+                # 원격 URL을 설정된 git_clone_url로 동기화
+                command_remote = ['git', '-C', sjva_agent_path, 'remote', 'set-url', 'origin', git_clone_url]
+                SupportSubprocess.execute_command_return(command_remote)
+                command_fetch = ['git', '-C', sjva_agent_path, 'fetch', 'origin']
+                SupportSubprocess.execute_command_return(command_fetch)
+                command = ['git', '-C', sjva_agent_path, 'reset', '--hard', 'origin/main']
                 result = SupportSubprocess.execute_command_return(command)
                 F.logger.debug(d(result))
-                command = ['git', '-C', sjva_agent_path, 'pull']
-                result = SupportSubprocess.execute_command_return(command)
-                F.logger.debug(d(result))
+                if 'fatal' in str(result.get('log', '')) or 'error' in str(result.get('log', '')):
+                    command = ['git', '-C', sjva_agent_path, 'reset', '--hard', 'origin/master']
+                    result = SupportSubprocess.execute_command_return(command)
+                    F.logger.debug(d(result))
                 ret['git_update'] = True
             else:
                 result = SupportFile.rmtree(sjva_agent_path)
@@ -254,7 +269,7 @@ class Task(object):
             ret['flag_clone'] = True
                 
         if ret['flag_clone']:
-            command = ['git', '-C', all_agent_path, 'clone', 'https://github.com/soju6jan/SjvaAgent.bundle' + '.git', '--depth', '1']
+            command = ['git', '-C', all_agent_path, 'clone', git_clone_url, '--depth', '1']
             log = SupportSubprocess.execute_command_return(command, log=True)
             F.logger.debug(log)
 
