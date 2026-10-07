@@ -46,7 +46,6 @@
 {{ macros.m_tab_content_end() }}  
 
 {{ macros.m_tab_content_start('agent', false) }}
-  {{ macros.setting_input_text('base_agent_git_url', 'SjvaAgent Git URL', value=arg['base_agent_git_url'], desc=['설치할 SjvaAgent Git 저장소 URL', '기본값: https://github.com/ggulamtggul/SjvaAgent.bundle', '사용자 저장소 또는 공식 저장소(https://github.com/soju6jan/SjvaAgent.bundle) 지정 가능']) }}
   {{ macros.setting_checkbox('base_agent_auto_update', 'Agent 자동 업데이트', value=arg['base_agent_auto_update'], desc=['On : 시작시 Agent를 자동 업데이트']) }}
 {{ macros.m_tab_content_end() }}  
   
