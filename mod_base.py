@@ -161,7 +161,7 @@ class ModuleBase(PluginModuleBase):
             msg = f"SjvaAgent : {PlexWebHandle.get_sjva_agent_version(url=url, token=token)}<br>"
             regex = re.compile("VERSION\s=\s'(?P<version>.*?)'")
             git_url = P.ModelSetting.get('base_agent_git_url') or 'https://github.com/ggulamtggul/SjvaAgent.bundle'
-            raw_version_url = git_url.rstrip('.git').rstrip('/').replace('github.com', 'raw.githubusercontent.com') + '/main/Contents/Code/version.py'
+            raw_version_url = git_url.rstrip('.git').rstrip('/').replace('github.com', 'raw.githubusercontent.com') + '/HEAD/Contents/Code/version.py'
             try:
                 text = requests.get(raw_version_url, timeout=5).text
                 match = regex.search(text)

@@ -208,7 +208,7 @@ class Task(object):
         # 저장소 URL
         git_url = P.ModelSetting.get('base_agent_git_url') or 'https://github.com/ggulamtggul/SjvaAgent.bundle'
         git_clone_url = git_url if git_url.endswith('.git') else git_url + '.git'
-        raw_version_url = git_url.rstrip('.git').rstrip('/').replace('github.com', 'raw.githubusercontent.com') + '/main/Contents/Code/version.py'
+        raw_version_url = git_url.rstrip('.git').rstrip('/').replace('github.com', 'raw.githubusercontent.com') + '/HEAD/Contents/Code/version.py'
 
         # 버전
         regex = re.compile("VERSION\s=\s'(?P<version>.*?)'")
