@@ -390,7 +390,12 @@ class Task(object):
                 Task.show_process(other, con, cur)
         if data['dryrun'] == False and data['command'] in ['start2-2', 'start3']:
             # 이 폴더의 파일을 아직 가리키는 항목(이 쇼·공유 쇼의 쇼/시즌/에피소드)이 있으면 지우지 않는다
-            remaining = Task.bundle_references(con, data['db']['hash'])
+            # 섹션 목록을 읽는 con은 작업 시작 시점 스냅숏을 보므로, 방금 바꾼 주소를 보려면 새 연결로 센다
+            fresh = sqlite3.connect(P.ModelSetting.get('base_path_db'))
+            try:
+                remaining = Task.bundle_references(fresh, data['db']['hash'])
+            finally:
+                fresh.close()
             if remaining:
                 Task.skip_bundle_delete(data, f"폴더 파일을 아직 쓰는 항목 {remaining}개")
                 return
