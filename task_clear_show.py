@@ -368,11 +368,32 @@ class Task(object):
         #P.logger.error(data['meta']['remove'] )
         #P.logger.error(data['use_filepath'] )
 
-        if data['shared_with'] or not data['db_updated']:
-            reason = f"다른 쇼와 메타데이터 폴더 공유 {data['shared_with']}" if data['shared_with'] else 'DB 갱신 실패'
-            P.logger.warning(f"메타데이터 파일 삭제 건너뜀 ({reason}): {data['db']['title']} ({data['db']['id']})")
-            data['skipped_reason'] = reason
+        if data.get('sharer_pass'):
+            # 다른 쇼를 정리하다 함께 주소만 바꾸는 중: 폴더 삭제는 원래 쇼 쪽에서 한 번만 한다
             return
+        if not data['db_updated']:
+            Task.skip_bundle_delete(data, 'DB 갱신 실패')
+            return
+        if data['shared_with'] and data['dryrun'] == False and data['command'] in ['start2-2', 'start3']:
+            # 같은 폴더를 쓰는 다른 섹션의 쇼도 http 주소로 바꾼 뒤에 지운다
+            for other_id in data['shared_with']:
+                other_cs = con.execute('SELECT * FROM metadata_items WHERE id = ?', (other_id,))
+                other_cs.row_factory = dict_factory
+                other_row = other_cs.fetchone()
+                if other_row is None:
+                    continue
+                other = {'mode': 'show', 'status': {'is_working': 'run', 'total_size': 0, 'remove_size': 0, 'count': 0, 'current': 0},
+                         'command': data['command'], 'section_id': other_row['library_section_id'], 'dryrun': False,
+                         'process': {}, 'file_count': 0, 'remove_count': 0, 'remove_orphans': False,
+                         'sharer_pass': True, 'db': other_row}
+                P.logger.info(f"공유 폴더 함께 변환: {other_row['title']} ({other_id}, 섹션 {other_row['library_section_id']})")
+                Task.show_process(other, con, cur)
+        if data['dryrun'] == False and data['command'] in ['start2-2', 'start3']:
+            # 이 폴더의 파일을 아직 가리키는 항목(이 쇼·공유 쇼의 쇼/시즌/에피소드)이 있으면 지우지 않는다
+            remaining = Task.bundle_references(con, data['db']['hash'])
+            if remaining:
+                Task.skip_bundle_delete(data, f"폴더 파일을 아직 쓰는 항목 {remaining}개")
+                return
 
         for base, folders, files in os.walk(data['meta']['metapath']):
             for f in files:
@@ -448,6 +469,25 @@ class Task(object):
         P.logger.exception(repr(e))
                 
     
+
+    @staticmethod
+    def skip_bundle_delete(data, reason):
+        P.logger.warning(f"메타데이터 파일 삭제 건너뜀 ({reason}): {data['db']['title']} ({data['db']['id']})")
+        data['skipped_reason'] = reason
+
+    @staticmethod
+    def bundle_references(con, bundle_hash):
+        """이 메타데이터 폴더(hash)를 쓰는 쇼들과 그 시즌·에피소드 중 metadata:// 주소가 남은 항목 수."""
+        columns = {row[1] for row in con.execute('PRAGMA table_info(metadata_items)')}
+        url_columns = [c for c in ('user_thumb_url', 'user_art_url', 'user_banner_url', 'user_music_url', 'user_clear_logo_url') if c in columns]
+        condition = ' OR '.join(f"{c} LIKE 'metadata://%'" for c in url_columns)
+        query = f"""
+            WITH shows AS (SELECT id FROM metadata_items WHERE metadata_type = 2 AND hash = ?),
+                 seasons AS (SELECT id FROM metadata_items WHERE parent_id IN (SELECT id FROM shows))
+            SELECT COUNT(*) FROM metadata_items
+            WHERE (id IN (SELECT id FROM shows) OR id IN (SELECT id FROM seasons)
+                   OR parent_id IN (SELECT id FROM seasons)) AND ({condition})"""
+        return con.execute(query, (bundle_hash,)).fetchone()[0]
 
     @staticmethod
     def xml_analysis(combined_xmlpath, data, show_data, con, is_episode=False):
