@@ -20,6 +20,7 @@ from support import SupportSubprocess
 from support import AlchemyEncoder
 from plugin.create_plugin import PluginBase
 from plugin.logic_module_base import PluginModuleBase, PluginPageBase
+from plugin.route import default_route_socketio_page
 from framework.scheduler import Job as FrameworkJob
 
 from .setup import F, P
@@ -264,8 +265,7 @@ def plex_api(func: Callable) -> Callable:
         params: dict = func(*args, **kwds)
         key = params.pop('key', '/identity')
         method = params.pop('method', 'GET')
-        params['X-Plex-Token'] = P.ModelSetting.get('base_token')
-        headers = {'Accept': 'application/json'}
+        headers = {'Accept': 'application/json', 'x-plex-token': P.ModelSetting.get('base_token')}
         return parse_json_response(request(method, f'{P.ModelSetting.get("base_url")}{key}', params=params, headers=headers))
     return wrapper
 
@@ -274,7 +274,7 @@ def plex_api(func: Callable) -> Callable:
 def plex_refresh(section: int, path: Optional[str] = None, force: bool = False) -> dict[str, str]:
     params = {
         'key': f'/library/sections/{section}/refresh',
-        'method': 'GET',
+        'method': 'POST',
     }
     if force:
         params['force'] = 1
@@ -454,7 +454,7 @@ def check_scanning(scannings: list, max_scan_time: int) -> None:
         if int((datetime.datetime.now() - scan.process_start_time).total_seconds() / 60) >= max_scan_time:
             P.logger.warning(f'스캔 시간 {max_scan_time}분 초과: {scan.target}')
             P.logger.warning(f'스캔 QUEUE에서 제외: {scan.target}')
-            scan.remove_in_queue(scan)
+            scan.remove_in_queue(scan.id)
             scan.set_status('FINISH_TIMEOVER', save=True)
 
 
@@ -502,34 +502,6 @@ def format_file_size(size: int, decimals: int = 1, binary_system: bool = True) -
             return f'{size:.{decimals}f}{unit}'
         size /= step
     return f'{size:.{decimals}f}{largest_unit}'
-
-
-def default_route_socketio_page(page):
-    module = page.parent
-    page.socketio_list = page.socketio_list or []
-
-    @F.socketio.on('connect', namespace=f'/{P.package_name}/{module.name}/{page.name}')
-    @F.login_required
-    def connect():
-        P.logger.debug(f'socket_connect : {P.package_name}/{module.name}/{page.name}')
-        page.socketio_list.append(flask.request.sid)
-        socketio_callback('start', '')
-        page.socketio_connect()
-
-    @F.socketio.on('disconnect', namespace=f'/{P.package_name}/{module.name}/{page.name}')
-    def disconnect():
-        P.logger.debug(f'socket_disconnect : {P.package_name}/{module.name}/{page.name}')
-        page.socketio_list.remove(flask.request.sid)
-        page.socketio_disconnect()
-
-    def socketio_callback(cmd, data, encoding=True):
-        if page.socketio_list:
-            if encoding:
-                data = json.dumps(data, cls=AlchemyEncoder)
-                data = json.loads(data)
-            F.socketio.emit(cmd, data, namespace=f'/{P.package_name}/{module.name}/{page.name}')
-
-    page.socketio_callback = socketio_callback
 
 
 def celery_is_available() -> bool:
