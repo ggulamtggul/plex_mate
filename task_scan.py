@@ -1,16 +1,14 @@
-import re
+from uuid import uuid4
 
-from support import SupportSubprocess
 from tool import ToolNotify
 
+from .setup import *
 from .extensions import check_scanning, vfs_forget, vfs_refresh
 from .model_scan import ModelScanItem
 from .plex_bin_scanner import PlexBinaryScanner
 from .plex_db import PlexDBHandle
 from .plex_web import PlexWebHandle
-from .setup import *
 from .shyni_backend import ShyniBackend
-from .task_base import plex_exclusive
 
 name = 'scan'
 logger = P.logger
@@ -22,6 +20,24 @@ class Task:
     filecheck_thread = None
     filecheck_heartbeat = time.time()
     current_scan_count = 0
+    scan_count_lock = threading.Lock()
+    counted_scan_ids = set()
+
+    @staticmethod
+    def _start_scan(scan_id):
+        scan_id = str(scan_id)
+        with Task.scan_count_lock:
+            if scan_id not in Task.counted_scan_ids:
+                Task.counted_scan_ids.add(scan_id)
+                Task.current_scan_count += 1
+
+    @staticmethod
+    def _finish_scan(scan_id):
+        scan_id = str(scan_id)
+        with Task.scan_count_lock:
+            if scan_id in Task.counted_scan_ids:
+                Task.counted_scan_ids.remove(scan_id)
+                Task.current_scan_count = max(Task.current_scan_count - 1, 0)
 
     @F.celery.task
     def start():
@@ -63,158 +79,78 @@ class Task:
         # READY로 쌓이기만 한다. 기록하고 반복문을 다시 돌린다
         while True:
             try:
-                Task.filecheck_loop()
-            except Exception:
-                logger.exception("파일 체크 스레드 오류, 60초 뒤 다시 시작합니다")
-            time.sleep(60)
-
-
-    def watchdog_thread_function():
-        # 예외 없이 멈춰 있는 경우(응답 없는 마운트·외부 호출)는 위에서 못 잡는다. 조용히 멈추지 않게 알린다
-        notified = False
-        while True:
-            time.sleep(60)
-            try:
-                limit = max(600, (P.ModelSetting.get_int(f"{name}_filecheck_thread_interval") or 60) * 5)
-                idle = time.time() - Task.filecheck_heartbeat
-                stalled = idle > limit
-                if stalled and not notified:
-                    logger.error(f"파일 체크가 {int(idle / 60)}분째 멈춰 있습니다. 스캔 요청이 처리되지 않습니다")
-                    ToolNotify.send_message(f"[plex_mate] 스캔 파일 체크가 {int(idle / 60)}분째 멈춰 있습니다. FlaskFarm 재시작이 필요할 수 있습니다.", message_id='plex_mate_scan_stalled')
-                elif notified and not stalled:
-                    logger.info("파일 체크가 다시 동작합니다")
-                notified = stalled
-            except Exception:
-                logger.exception("스캔 감시 스레드 오류")
-
-
-    def filecheck_loop():
-        while True:
-            Task.filecheck_heartbeat = time.time()
-            items = ModelScanItem.get_list_by_status('READY')
-            vfs_rules = P.ModelSetting.get_list('scan_vfs_change_rule')
-            #logger.info(f"filecheck_thread_function : {len(items)}")
-            for item in items:
                 Task.filecheck_heartbeat = time.time()
-                try:
-                    if item.mode == 'ADD':
-                        item.filecheck_count += 1
-                        now = datetime.now()
-                        # 샤이니 대상 분기(F절) — FF 마운트의 파일 존재/Plex 준비와 무관하게
-                        # 즉시 요청. 파일이 안 보이면 샤이니 서버가 자체적으로 부모 폴더를
-                        # non-recursive refresh 하며 대기한다(mode=add + wait).
-                        ShyniBackend.request_scan(item)
-                        if not P.ModelSetting.get_bool('scan_plex_use'):
-                            ShyniBackend.finalize_plex_off(item)
-                            continue
-                        if item.section_id == None:
-                            section_info = PlexDBHandle.get_section_info_by_filepath(item.target)
-                            if section_info != None:
-                                item.section_id = section_info['section_id']
-                                item.section_type = section_info['section_type']
-                            else:
-                                item.set_status('FINISH_NOT_FIND_LIBRARY', save=True)
+                items = ModelScanItem.get_list_by_status('READY')
+                #logger.info(f"filecheck_thread_function : {len(items)}")
+                for item in items:
+                    Task.filecheck_heartbeat = time.time()
+                    try:
+                        if item.mode == 'ADD':
+                            item.filecheck_count += 1
+                            # 샤이니 대상 분기(F절) — FF 마운트의 파일 존재/Plex 준비와 무관하게
+                            # 즉시 요청. 파일이 안 보이면 샤이니 서버가 자체적으로 부모 폴더를
+                            # non-recursive refresh 하며 대기한다(mode=add + wait).
+                            ShyniBackend.request_scan(item)
+                            if not P.ModelSetting.get_bool('scan_plex_use'):
+                                ShyniBackend.finalize_plex_off(item)
                                 continue
-
-                        if P.ModelSetting.get_bool('scan_use_vfs_refresh'):
-                            try:
-                                vfs_refresh(item.target)
-                                '''
-                                rclone = F.PluginManager.get_plugin_instance('rclone')
-                                cmd = [rclone.ModelSetting.get('rclone_path'), 'rc', 'vfs/refresh']
-
-                                for rule in vfs_rules:
-                                    tmps = rule.split('|')
-                                    if len(tmps) != 3 and len(tmps) != 5: continue
-                                    cmd += [f"--rc-addr={tmps[2]}", f"_async=false"]
-                                    if len(tmps) == 5: cmd += [f"--rc-user={tmps[3]}", f"--rc-pass={tmps[4]}"]
-                                    if item.target.startswith(tmps[0]) == False:
-                                        continue
-                                    remote = item.target.replace(tmps[0], tmps[1]).replace('\\', '/').replace('//', '/')
-
-                                    # 현시점 파일인지, 폴더인지 모름
-                                    # 특히나 1회차면?
-                                    # 부모를 넣어서 OK를 받자
-                                    call_remote = remote.rsplit('/', 1)[0]
-                                    is_ok = False
-                                    while True:
-                                        cmd.append(f'dir={call_remote}')
-                                        result = SupportSubprocess.execute_command_return(cmd)
-                                        logger.info(' '.join(cmd))
-                                        logger.debug(f"vfs/refresh : {result}")
-                                        vfs_ret = json.loads(result['log'].replace('\n', ''))
-                                        logger.info(vfs_ret['result'][call_remote])
-
-                                        if vfs_ret['result'][call_remote] == 'file does not exist':
-                                            # 1회차 일 경우. 더 상위를 한번 호출하면 다음턴에 해결
-                                            call_remote = call_remote.rsplit('/', 1)[0]
-                                            if call_remote == '':
-                                                break
-                                            del cmd[-1]
-                                        else:
-                                            is_ok = True
-                                            break
-                                    if is_ok:
-                                        break
-                                '''
-                            except Exception as e:
-                                logger.error(f"Exception:{str(e)}")
-                                logger.error(traceback.format_exc())
-
-                        if os.path.exists(item.target):
-                            if os.path.isfile(item.target):
-                                item.target_type = 'FILE'
-                                item.scan_folder = os.path.dirname(item.target)
-                                if Task.__check_media_part_data(item):
+                            if item.section_id == None:
+                                section_info = PlexDBHandle.get_section_info_by_filepath(item.target)
+                                if section_info != None:
+                                    item.section_id = section_info['section_id']
+                                    item.section_type = section_info['section_type']
+                                else:
+                                    item.set_status('FINISH_NOT_FIND_LIBRARY', save=True)
                                     continue
 
-                            elif os.path.isdir(item.target):
-                                item.target_type = 'FOLDER'
-                                item.scan_folder = item.target
-                                '''
-                                사용자가 "비디오/방송중" 혹은 "영화/제목/가" 처럼 최상위 폴더를 스캔 요청할 경우
-                                그만큼 다음 항목의 파일 체크까지 지연되므로 존재하는 경로는 수동으로 vfs/refresh 하도록 유도
-                                # recursive=true vfs/refresh
-                                if P.ModelSetting.get_bool('scan_use_vfs_refresh'):
-                                    try:
-                                        cmd[-1] = f'dir={remote}'
-                                        cmd.append('recursive=true')
-                                        result = SupportSubprocess.execute_command_return(cmd)
-                                        logger.info(' '.join(cmd))
-                                        logger.debug(f"vfs/refresh2 : {result}")
-                                    except Exception as e:
-                                        logger.error(f"Exception:{str(e)}")
-                                        logger.error(traceback.format_exc())
-                                '''
+                            if P.ModelSetting.get_bool('scan_use_vfs_refresh'):
+                                try:
+                                    vfs_refresh(item.target)
+                                except Exception as e:
+                                    logger.error(f"Exception:{str(e)}")
+                                    logger.error(traceback.format_exc())
 
-                            for _, queued_scan_folder, queued_mode in ModelScanItem.queue_list:
-                                if queued_scan_folder == item.scan_folder and queued_mode == item.mode:
-                                    item.set_status("FINISH_ALREADY_IN_QUEUE")
-                                    break
-                            else:
-                                item.set_status("ENQUEUE_ADD_FIND")
-                                item.init_for_queue()
-                                Task.scan_queue.put(item)
+                            if os.path.exists(item.target):
+                                if os.path.isfile(item.target):
+                                    item.target_type = 'FILE'
+                                    item.scan_folder = os.path.dirname(item.target)
+                                    if Task.__check_media_part_data(item):
+                                        continue
 
-                        else:
-                            if item.created_time + timedelta(minutes=P.ModelSetting.get_int("scan_max_wait_time")) < now:
-                                item.set_status("FINISH_TIMEOVER")
-                    elif item.mode == 'REFRESH':
-                        item.filecheck_count += 1
-                        now = datetime.now()
-                        # 샤이니 대상 refresh — Plex 처리와 독립, 존재 게이트 없이 요청
-                        ShyniBackend.request_refresh(item)
-                        if not P.ModelSetting.get_bool('scan_plex_use'):
-                            ShyniBackend.finalize_plex_off(item)
-                            continue
-                        if item.section_id == None:
-                            section_info = PlexDBHandle.get_section_info_by_filepath(item.target)
-                            if section_info != None:
-                                item.section_id = section_info['section_id']
-                                item.section_type = section_info['section_type']
+                                elif os.path.isdir(item.target):
+                                    item.target_type = 'FOLDER'
+                                    item.scan_folder = item.target
+
+                                for _, queued_scan_folder, queued_mode in ModelScanItem.queue_list:
+                                    if queued_scan_folder == item.scan_folder and queued_mode == item.mode:
+                                        item.set_status("FINISH_ALREADY_IN_QUEUE")
+                                        break
+                                else:
+                                    item.set_status("ENQUEUE_ADD_FIND")
+                                    item.init_for_queue()
+                                    Task.scan_queue.put(item)
+
                             else:
-                                item.set_status('FINISH_NOT_FIND_LIBRARY', save=True)
+                                max_wait_time = P.ModelSetting.get_int("scan_max_wait_time")
+                                if max_wait_time is None:
+                                    max_wait_time = 10
+                                if item.created_time + timedelta(minutes=max_wait_time) < datetime.now():
+                                    item.set_status("FINISH_TIMEOVER")
+                        elif item.mode == 'REFRESH':
+                            item.filecheck_count += 1
+                            # 샤이니 대상 refresh — Plex 처리와 독립, 존재 게이트 없이 요청
+                            ShyniBackend.request_refresh(item)
+                            if not P.ModelSetting.get_bool('scan_plex_use'):
+                                ShyniBackend.finalize_plex_off(item)
                                 continue
+                            if item.section_id == None:
+                                section_info = PlexDBHandle.get_section_info_by_filepath(item.target)
+                                if section_info != None:
+                                    item.section_id = section_info['section_id']
+                                    item.section_type = section_info['section_type']
+                                else:
+                                    item.set_status('FINISH_NOT_FIND_LIBRARY', save=True)
+                                    continue
                             if P.ModelSetting.get_bool('scan_use_vfs_refresh'):
                                 vfs_refresh(item.target)
                             if os.path.exists(item.target):
@@ -235,97 +171,115 @@ class Task:
                             else:
                                 item.set_status('NOT_EXIST', save=True)
 
-                    elif item.mode in ['REMOVE_FILE', 'REMOVE_FOLDER']:
-                        item.filecheck_count += 1
-                        now = datetime.now()
-                        # 샤이니 대상 분기 — 삭제도 서버별 독립 작업(F-4)
-                        ShyniBackend.request_scan(item)
-                        if not P.ModelSetting.get_bool('scan_plex_use'):
-                            ShyniBackend.finalize_plex_off(item)
-                            continue
-                        if item.section_id == None:
-                            section_info = PlexDBHandle.get_section_info_by_filepath(item.target)
-                            if section_info != None:
-                                item.section_id = section_info['section_id']
-                                item.section_type = section_info['section_type']
-                            else:
-                                item.set_status('FINISH_NOT_FIND_LIBRARY', save=True)
+                        elif item.mode in ['REMOVE_FILE', 'REMOVE_FOLDER']:
+                            item.filecheck_count += 1
+                            # 샤이니 대상 분기 — 삭제도 서버별 독립 작업(F-4)
+                            ShyniBackend.request_scan(item)
+                            if not P.ModelSetting.get_bool('scan_plex_use'):
+                                ShyniBackend.finalize_plex_off(item)
                                 continue
-                        if P.ModelSetting.get_bool('scan_use_vfs_refresh'):
-                            vfs_forget(item.target)
-                        '''
-                        REMOVE 모드에서 파일/폴더 존재 여부를 판단할 경우 대량의 파일을 하나씩 REMOVE 처리해야 함.
-                        부모 폴더만 스캔해도 되도록 존재 여부를 판단하지 않게 수정.
-                        '''
-                        #if os.path.exists(item.target) == False:
-                        if item.mode == 'REMOVE_FOLDER':
-                            item.scan_folder = item.target
-                        else:
-                            if item.target.startswith('/'):
-                                item.scan_folder = item.target.rsplit('/', 1)[0]
+                            if item.section_id == None:
+                                section_info = PlexDBHandle.get_section_info_by_filepath(item.target)
+                                if section_info != None:
+                                    item.section_id = section_info['section_id']
+                                    item.section_type = section_info['section_type']
+                                else:
+                                    item.set_status('FINISH_NOT_FIND_LIBRARY', save=True)
+                                    continue
+                            if P.ModelSetting.get_bool('scan_use_vfs_refresh'):
+                                vfs_forget(item.target)
+                            '''
+                            REMOVE 모드에서 파일/폴더 존재 여부를 판단할 경우 대량의 파일을 하나씩 REMOVE 처리해야 함.
+                            부모 폴더만 스캔해도 되도록 존재 여부를 판단하지 않게 수정.
+                            '''
+                            #if os.path.exists(item.target) == False:
+                            if item.mode == 'REMOVE_FOLDER':
+                                item.scan_folder = item.target
                             else:
-                                item.scan_folder = item.target.rsplit('\\', 1)[0]
-                        for _, queued_scan_folder, queued_mode in ModelScanItem.queue_list:
-                            if queued_scan_folder == item.scan_folder and queued_mode == item.mode:
-                                item.set_status("FINISH_ALREADY_IN_QUEUE")
-                                break
+                                if item.target.startswith('/'):
+                                    item.scan_folder = item.target.rsplit('/', 1)[0]
+                                else:
+                                    item.scan_folder = item.target.rsplit('\\', 1)[0]
+                            for _, queued_scan_folder, queued_mode in ModelScanItem.queue_list:
+                                if queued_scan_folder == item.scan_folder and queued_mode == item.mode:
+                                    item.set_status("FINISH_ALREADY_IN_QUEUE")
+                                    break
+                            else:
+                                item.set_status("ENQUEUE_REMOVE")
+                                item.init_for_queue()
+                                Task.scan_queue.put(item)
                         else:
-                            item.set_status("ENQUEUE_REMOVE")
-                            item.init_for_queue()
-                            Task.scan_queue.put(item)
-                        #else:
-                        #    if item.created_time + timedelta(minutes=P.ModelSetting.get_int("scan_max_wait_time")) < now:
-                        #        item.set_status("FINISH_TIMEOVER")
-                except Exception as e:
-                    logger.error(f"Exception:{str(e)}")
-                    logger.error(traceback.format_exc())
-                finally:
-                    item.save()
-            max_scan_time = P.ModelSetting.get_int('scan_max_scan_time') or 0
-            if max_scan_time > 0:
-                scannings = ModelScanItem.get_list_by_status('SCANNING')
-                check_scanning(scannings, max_scan_time)
-            # 샤이니 대상 job 상태 확정(F-4) — 주기당 1회 폴링
-            ShyniBackend.poll_running()
-            #P.logger.warning("파일체크 대기")
-            for i in range(P.ModelSetting.get_int(f"{name}_filecheck_thread_interval") or 60):
+                            logger.error(f"지원하지 않는 스캔 모드: item={item.id} mode={item.mode}")
+                            item.set_status('FINISH_INVALID_MODE')
+                    except Exception as e:
+                        logger.error(f"Exception:{str(e)}")
+                        logger.error(traceback.format_exc())
+                    finally:
+                        item.save()
+                max_scan_time = P.ModelSetting.get_int('scan_max_scan_time')
+                if max_scan_time is None:
+                    max_scan_time = 60
+                if max_scan_time > 0:
+                    scannings = ModelScanItem.get_list_by_status('SCANNING')
+                    check_scanning(scannings, max_scan_time)
+                # 샤이니 대상 job 상태 확정(F-4) — 주기당 1회 폴링
+                ShyniBackend.poll_running()
+                #P.logger.warning("파일체크 대기")
+                filecheck_thread_interval = P.ModelSetting.get_int(f"{name}_filecheck_thread_interval")
+                if filecheck_thread_interval is None:
+                    filecheck_thread_interval = 60
+                else:
+                    filecheck_thread_interval = max(filecheck_thread_interval, 1)
+                for i in range(filecheck_thread_interval):
+                    time.sleep(1)
+                    #print(i)
+                #time.sleep(60)
+            except Exception:
+                logger.exception("파일 체크 쓰레드 오류")
                 time.sleep(1)
-                #print(i)
-            #time.sleep(60)
+
+
+    def watchdog_thread_function():
+        # 예외 없이 멈춰 있는 경우(응답 없는 마운트·외부 호출)는 try/except로 못 잡는다. 조용히 멈추지 않게 알린다
+        notified = False
+        while True:
+            time.sleep(60)
+            try:
+                limit = max(600, (P.ModelSetting.get_int(f"{name}_filecheck_thread_interval") or 60) * 5)
+                idle = time.time() - Task.filecheck_heartbeat
+                stalled = idle > limit
+                if stalled and not notified:
+                    logger.error(f"파일 체크가 {int(idle / 60)}분째 멈춰 있습니다. 스캔 요청이 처리되지 않습니다")
+                    ToolNotify.send_message(f"[plex_mate] 스캔 파일 체크가 {int(idle / 60)}분째 멈춰 있습니다. FlaskFarm 재시작이 필요할 수 있습니다.", message_id='plex_mate_scan_stalled')
+                elif notified and not stalled:
+                    logger.info("파일 체크가 다시 동작합니다")
+                notified = stalled
+            except Exception:
+                logger.exception("스캔 감시 스레드 오류")
 
 
     def scan_thread_function():
         while True:
             try:
                 while True:
-                    if Task.current_scan_count < (max_scan_count := P.ModelSetting.get_int(f"{name}_max_scan_count") or 1):
+                    max_scan_count = P.ModelSetting.get_int(f"{name}_max_scan_count")
+                    max_scan_count = 1 if max_scan_count is None else max(max_scan_count, 1)
+                    if Task.current_scan_count < max_scan_count:
                         break
                     # 스캔 카운터의 정상 여부 확인
-                    logger.debug(f"최대 스캔 수 도달: {Task.current_scan_count} / {max_scan_count}")
+                    #logger.debug(f"최대 스캔 수 도달: {Task.current_scan_count} / {max_scan_count}")
                     time.sleep(5)
                 db_item = Task.scan_queue.get()
-                if db_item.flag_cancel:
+                try:
+                    if db_item is None or db_item.flag_cancel:
+                        continue
+                    Task.process_item_add_on_queue(db_item)
+                finally:
                     Task.scan_queue.task_done()
-                    continue
-                if db_item is None:
-                    Task.scan_queue.task_done()
-                    continue
-
-                Task.process_item_add_on_queue(db_item)
-                Task.scan_queue.task_done()
             except Exception as e:
-                logger.error(f"Exception:{str(e)}")
-                logger.error(traceback.format_exc())
+                logger.exception("스캔 큐 쓰레드 오류")
+                time.sleep(1)
 
-    """
-    def __incompleted_rescan():
-        failed_list = ModelScanItem.get_incompleted()
-        P.logger.error(len(failed_list))
-        for item in failed_list:
-            item.init_for_queue()
-            Task.scan_queue.put(item)
-        return len(failed_list)
-    """
 
     def get_int_list(key):
         raw = P.ModelSetting.get(key) or ''
@@ -338,53 +292,62 @@ class Task:
         return items
 
     def process_item_add_on_queue(db_item:ModelScanItem):
+        callback_id = f"pm_scan_{uuid4().hex}_{db_item.id}"
         try:
             if db_item.mode == 'ADD' and Task.__check_media_part_data(db_item):
-                pass
+                return
+            Task._start_scan(callback_id)
+            use_web_request = P.ModelSetting.get_bool('scan_use_web_request')
+            scan_web_sections = Task.get_int_list('scan_web_sections')
+            if use_web_request and db_item.section_id and (not scan_web_sections or int(db_item.section_id) in scan_web_sections):
+                threading.Thread(
+                    target=Task.handle_web_scan,
+                    args=(db_item,),
+                    kwargs={'callback_id': callback_id},
+                ).start()
             else:
-                # 기존처럼 웹, 바이너리 구분 없이 스캔 카운터를 증가 (웹 스캔의 증가 여부는 제고 필요)
-                Task.current_scan_count += 1
-                use_web_request = P.ModelSetting.get_bool('scan_use_web_request')
-                scan_web_sections = Task.get_int_list('scan_web_sections')
-                if use_web_request and db_item.section_id and (not scan_web_sections or int(db_item.section_id) in scan_web_sections):
-                    threading.Thread(target=Task.handle_web_scan, args=(db_item,)).start()
-                else:
-                    PlexBinaryScanner.scan_refresh(db_item.section_id, db_item.scan_folder, callback_function=Task.subprcoess_callback_function, callback_id=f"pm_scan_{db_item.id}")
+                PlexBinaryScanner.scan_refresh(db_item.section_id, db_item.scan_folder, callback_function=Task.subprcoess_callback_function, callback_id=callback_id)
         except Exception as e:
             logger.error(f"Exception:{str(e)}")
             logger.error(traceback.format_exc())
+            Task.subprcoess_callback_function(callback_id, "ERROR", str(e))
 
 
-    def handle_web_scan(db_item, max_wait=300, interval=30):
-        Task.subprcoess_callback_function(f"pm_scan_{db_item.id}", "START", "Web scan started")
-        web_target = db_item.scan_folder
-        section_type = db_item.section_type or None
-        if section_type and str(section_type) == "2":
-            try:
-                escaped_folder = db_item.scan_folder.replace("'", "''")
-                query = f"""SELECT root_path FROM section_locations WHERE '{escaped_folder}' LIKE root_path || '%' ORDER BY LENGTH(root_path) DESC LIMIT 1;"""
-                result = PlexDBHandle.select(query)
-                root_path = result[0]['root_path'] if result else None
-                if root_path and os.path.normpath(db_item.scan_folder) != os.path.normpath(root_path):
-                    rel_path = os.path.relpath(db_item.scan_folder, root_path)
-                    parts = rel_path.split(os.sep)
-                    show_name = parts[0]
-                    web_target =  os.path.join(root_path, show_name)
-                    P.logger.debug(f"[handle_web_scan] Adjusted web_target: {web_target}")
-            except Exception as e:
-                logger.error(f"Exception:{str(e)}")
-                logger.error(traceback.format_exc())
-        PlexWebHandle.path_scan(db_item.section_id, web_target)
+    def handle_web_scan(db_item, max_wait=300, interval=30, callback_id=None):
+        callback_id = callback_id or f"pm_scan_{uuid4().hex}_{db_item.id}"
+        try:
+            Task.subprcoess_callback_function(callback_id, "START", "Web scan started")
+            web_target = db_item.scan_folder
+            section_type = db_item.section_type or None
+            if section_type and str(section_type) == "2":
+                try:
+                    escaped_folder = db_item.scan_folder.replace("'", "''")
+                    query = f"""SELECT root_path FROM section_locations WHERE '{escaped_folder}' LIKE root_path || '%' ORDER BY LENGTH(root_path) DESC LIMIT 1;"""
+                    result = PlexDBHandle.select(query)
+                    root_path = result[0]['root_path'] if result else None
+                    if root_path and os.path.normpath(db_item.scan_folder) != os.path.normpath(root_path):
+                        rel_path = os.path.relpath(db_item.scan_folder, root_path)
+                        parts = rel_path.split(os.sep)
+                        show_name = parts[0]
+                        web_target = os.path.join(root_path, show_name)
+                        P.logger.debug(f"[handle_web_scan] Adjusted web_target: {web_target}")
+                except Exception:
+                    logger.exception("웹 스캔 경로 조정 오류")
+            PlexWebHandle.path_scan(db_item.section_id, web_target)
 
-        waited = 0
-        while waited < max_wait:
-            if Task.__check_media_part_data(db_item):
-                Task.subprcoess_callback_function(f"pm_scan_{db_item.id}", "END", "Web scan completed (media found)", web=True)
-                return
-            time.sleep(interval)
-            waited += interval
+            # 웹 스캔은 ADD 모드만 고려되어 있음. REMOVE/REFRESH 모드 구현 필요
+            waited = 0
+            while waited < max_wait:
+                if Task.__check_media_part_data(db_item):
+                    Task.subprcoess_callback_function(callback_id, "END", "Web scan completed (media found)", web=True)
+                    return
+                time.sleep(interval)
+                waited += interval
 
-        Task.subprcoess_callback_function(f"pm_scan_{db_item.id}", "END", "Web scan timeout - media not found", web=False)
+            Task.subprcoess_callback_function(callback_id, "END", "Web scan timeout - media not found", web=False)
+        except Exception as e:
+            logger.exception("웹 스캔 오류")
+            Task.subprcoess_callback_function(callback_id, "ERROR", str(e))
 
     def subprcoess_callback_function(call_id, mode, log, web=False):
         logger.debug(f"[{mode}] [{log}]")
@@ -455,25 +418,6 @@ class Task:
                         if meta_id and (meta_agent.startswith("tv.plex.agents") or P.ModelSetting.get_bool('scan_refresh_after_scanning')):
                             logger.info(f"스캔: meta refresh {meta_id}")
                             PlexWebHandle.refresh_by_id(meta_id)
-                        """
-                        2026-03-24 halfaider
-                        플렉스 기본 에이전트가 아닌 경우 플렉스 전용 정보(slug, clearlogo) 업데이트
-                        slug는 업데이트 API가 없어서 DB 조작 필요
-
-                        2026-03-26 halfaider
-                        sjva 에이전트에서도 On 되어 있으면 스캔시 두번 작업하게 됨
-                        에이전트에서만 요청하는 방식으로 수정
-                        """
-                        #meta_guid = rows[0].get('guid') or ''
-                        #meta_guid_path = meta_guid.split("?")[0].split("://")[-1]
-                        #meta_guid_parts = meta_guid_path.split('/')
-                        #meta_code, _, _ = (meta_guid_parts + [None, None])[:3]
-                        #if meta_code.startswith(("FT", "MT")):
-                        #    try:
-                        #        allowed_sections = [int(s) for s in re.split(r'\W', P.ModelSetting.get('scan_plex_exclusive_sections')) if s.isdigit()]
-                        #        plex_exclusive.delay(metadata_id=meta_id, allowed_sections=allowed_sections)
-                        #    except Exception:
-                        #        P.logger.exception(f"플렉스 전용 정보 업데이트에 실패했습니다.")
             elif mode == "ERROR":
                 # 스캔이 정상 종료되지 않은 경우 다음 재실행시 스캔 되도록 FINISH_SCANNING 상태로 바꿈
                 logger.error(f'스캔이 정상 처리되지 않았습니다: {db_item.mode} "{db_item.target}"')
@@ -486,4 +430,4 @@ class Task:
         finally:
             match mode:
                 case 'END' | 'ERROR':
-                    Task.current_scan_count = max(Task.current_scan_count - 1, 0)
+                    Task._finish_scan(call_id)
